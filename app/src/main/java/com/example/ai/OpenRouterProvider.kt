@@ -23,14 +23,30 @@ class OpenRouterProvider(
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    val curatedModels = listOf(
-        OpenRouterModelInfo("google/gemini-2.0-flash-exp:free", "Gemini 2.0 Flash Exp (Free)", 1048576, true),
-        OpenRouterModelInfo("meta-llama/llama-3.3-70b-instruct:free", "Llama 3.3 70B Instruct (Free)", 131072, true),
-        OpenRouterModelInfo("qwen/qwen-2.5-72b-instruct:free", "Qwen 2.5 72B Instruct (Free)", 32768, true),
-        OpenRouterModelInfo("deepseek/deepseek-chat-v3-0324:free", "DeepSeek V3 (Free)", 64000, true),
-        OpenRouterModelInfo("anthropic/claude-3.5-sonnet", "Claude 3.5 Sonnet", 200000, false),
-        OpenRouterModelInfo("openai/gpt-4o-mini", "GPT-4o Mini", 128000, false)
-    )
+    @Volatile
+    private var cachedModels: List<OpenRouterModelInfo> = emptyList()
+    @Volatile
+    private var cachedIsFreeTierOnly: Boolean? = null
+
+    suspend fun isKeyFreeTierOnly(apiKey: String): Boolean = withContext(Dispatchers.IO) {
+        cachedIsFreeTierOnly?.let { return@withContext it }
+        val result = runCatching {
+            val req = Request.Builder()
+                .url("https://openrouter.ai/api/v1/auth/key")
+                .addHeader("Authorization", "Bearer $apiKey")
+                .get()
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@use true
+                val data = JSONObject(resp.body?.string().orEmpty()).optJSONObject("data") ?: return@use true
+                val isFreeTier = data.optBoolean("is_free_tier", true)
+                val limitRemaining = data.optDouble("limit_remaining", -1.0)
+                isFreeTier && limitRemaining <= 0.0
+            }
+        }.getOrDefault(false)
+        cachedIsFreeTierOnly = result
+        result
+    }
 
     suspend fun fetchAvailableModels(apiKey: String?): Result<List<OpenRouterModelInfo>> = withContext(Dispatchers.IO) {
         runCatching {
@@ -55,11 +71,66 @@ class OpenRouterProvider(
                     val promptPrice = pricing?.optString("prompt", "1")?.toDoubleOrNull() ?: 1.0
                     val compPrice = pricing?.optString("completion", "1")?.toDoubleOrNull() ?: 1.0
                     val isFree = id.endsWith(":free") || (promptPrice == 0.0 && compPrice == 0.0)
-                    list.add(OpenRouterModelInfo(id, name, ctx, isFree))
+                    val supportedParams = obj.optJSONArray("supported_parameters")
+                    val supportsTools = if (supportedParams != null) {
+                        (0 until supportedParams.length()).any { supportedParams.optString(it) == "tools" }
+                    } else true
+                    list.add(OpenRouterModelInfo(id, name, ctx, isFree, supportsTools))
                 }
-                list.sortedWith(compareByDescending<OpenRouterModelInfo> { it.isFree }.thenBy { it.name })
+                val sorted = list.sortedWith(
+                    compareByDescending<OpenRouterModelInfo> { it.isFree }
+                        .thenByDescending { it.supportsTools }
+                        .thenByDescending { it.contextLength }
+                        .thenBy { it.name }
+                )
+                cachedModels = sorted
+                sorted
             }
         }
+    }
+
+    suspend fun resolveCandidateModels(
+        apiKey: String,
+        requestedModel: String,
+        complexity: TaskComplexity,
+        requiresTools: Boolean,
+        preferFreeOnSimple: Boolean
+    ): List<String> {
+        if (requestedModel.isNotBlank() && requestedModel != AUTO_MODEL_ID) {
+            return listOf(requestedModel)
+        }
+        val freeOnly = isKeyFreeTierOnly(apiKey)
+        val models = cachedModels.ifEmpty {
+            fetchAvailableModels(apiKey).getOrElse { emptyList() }
+        }
+        if (models.isEmpty()) {
+            return listOf("openrouter/auto")
+        }
+
+        val toolFiltered = if (requiresTools) models.filter { it.supportsTools }.ifEmpty { models } else models
+        val tierFiltered = if (freeOnly || (preferFreeOnSimple && complexity == TaskComplexity.SIMPLE)) {
+            toolFiltered.filter { it.isFree }.ifEmpty { toolFiltered }
+        } else {
+            toolFiltered
+        }
+
+        val ranked = tierFiltered
+            .sortedByDescending { m ->
+                var score = m.contextLength / 1024
+                if (m.supportsTools) score += 500
+                if (freeOnly && m.isFree) score += 1000
+                if (!freeOnly && m.id == "openrouter/auto") score += 2000
+                if (complexity == TaskComplexity.CODING && (m.id.contains("coder", true) || m.id.contains("claude", true) || m.id.contains("deepseek", true))) score += 400
+                if (m.id.contains("gemini", true) || m.id.contains("qwen", true) || m.id.contains("llama", true)) score += 200
+                score
+            }
+            .map { it.id }
+            .toMutableList()
+
+        if (!freeOnly && !ranked.contains("openrouter/auto")) {
+            ranked.add("openrouter/auto")
+        }
+        return ranked.distinct().take(6)
     }
 
     suspend fun generate(

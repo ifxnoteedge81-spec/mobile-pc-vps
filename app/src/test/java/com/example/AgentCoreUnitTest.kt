@@ -54,4 +54,22 @@ class AgentCoreUnitTest {
         assertTrue("Python execution failed: ${res.stderr}", res.success)
         assertTrue("Expected fib6= 8 in stdout but got: ${res.stdout}", res.stdout.contains("fib6= 8"))
     }
+
+    @Test
+    fun humanChallengeAndUploads_workSafely() {
+        val captcha = CommandSecurityGuard.detectHumanChallenge("Please complete reCAPTCHA: I'm not a robot", "https://example.com")
+        assertEquals("CAPTCHA", captcha?.first)
+
+        val otp = CommandSecurityGuard.detectHumanChallenge("Enter OTP verification code sent to your phone")
+        assertEquals("OTP / 2FA", otp?.first)
+
+        val workspace = VirtualWorkspaceManager(tempFolder.newFolder("upload_root"))
+        val saved = workspace.saveUploadedFile("my cv (final).txt", "Kotlin Android Engineer".toByteArray()).getOrThrow()
+        assertTrue(saved.exists())
+        assertTrue(workspace.relativePathOf(saved).startsWith("uploads/"))
+
+        assertTrue(com.example.agent.AgentSkillRegistry.skills.any {
+            it.category == com.example.agent.SkillCategory.VIRTUAL_HANDS
+        })
+    }
 }

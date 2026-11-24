@@ -14,14 +14,25 @@ import com.example.security.PermissionLevel
 import com.example.storage.AgentRepository
 import com.example.storage.AutomationRuleEntity
 import com.example.storage.MemoryCategory
+import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
+
+data class HumanInterventionRequest(
+    val id: Long = System.nanoTime(),
+    val challengeType: String,
+    val reason: String,
+    val targetMode: String, // "BROWSER" or "VIRTUAL_HANDS"
+    val urlOrPackage: String,
+    val instructionForUser: String
+)
 
 data class ToolExecutionOutcome(
     val toolName: String,
     val success: Boolean,
     val output: String,
-    val verified: Boolean = true
+    val verified: Boolean = true,
+    val interventionRequest: HumanInterventionRequest? = null
 )
 
 data class PendingPermissionRequest(
@@ -72,7 +83,7 @@ class ToolRegistry(
         ),
         ToolDeclaration(
             name = "file_list",
-            description = "List files and directories inside virtual_env (e.g., '', 'workspace', 'scripts', 'projects', 'downloads').",
+            description = "List files and directories inside virtual_env (e.g., '', 'workspace', 'uploads', 'scripts', 'projects', 'downloads').",
             parametersSchema = schema(
                 props = mapOf("path" to prop("string", "Relative path inside virtual_env")),
                 required = emptyList()
@@ -80,7 +91,7 @@ class ToolRegistry(
         ),
         ToolDeclaration(
             name = "file_read",
-            description = "Read a text file from virtual_env.",
+            description = "Read a text file from virtual_env (including user uploaded files in uploads/).",
             parametersSchema = schema(
                 props = mapOf("path" to prop("string", "Relative path inside virtual_env")),
                 required = listOf("path")
@@ -144,20 +155,49 @@ class ToolRegistry(
             )
         ),
         ToolDeclaration(
+            name = "app_list",
+            description = "List launchable Android apps installed on the device so Virtual Hands can open and automate them.",
+            parametersSchema = schema(
+                props = mapOf("filter" to prop("string", "Optional keyword filter by app name or package")),
+                required = emptyList()
+            )
+        ),
+        ToolDeclaration(
+            name = "app_launch",
+            description = "Launch an installed Android app by display name (e.g., 'Chrome', 'WhatsApp', 'YouTube') or package name using Virtual Hands.",
+            parametersSchema = schema(
+                props = mapOf("app_name_or_package" to prop("string", "App name or Android package ID")),
+                required = listOf("app_name_or_package")
+            )
+        ),
+        ToolDeclaration(
             name = "device_screen_inspect",
-            description = "Inspect current Android screen UI hierarchy via authorized Accessibility Service (Virtual Hands).",
+            description = "Inspect the current Android screen UI hierarchy (text, descriptions, clickable/editable buttons, center coordinates) via Accessibility Virtual Hands.",
             parametersSchema = schema(props = emptyMap(), required = emptyList())
         ),
         ToolDeclaration(
             name = "device_virtual_hand",
-            description = "Perform an Android Accessibility Virtual Hand/Foot action (tap, swipe, click_text, type, back, home). Requires Level 2 confirmation.",
+            description = "Perform any Android Accessibility Virtual Hand action on the device screen (tap, double_tap, long_press, swipe, scroll_up, scroll_down, scroll_left, scroll_right, click_text, type, type_focused, launch_app, open_url, back, home, recents, notifications, quick_settings, screenshot, wait_ms). Requires Level 2 confirmation.",
             parametersSchema = schema(
                 props = mapOf(
-                    "action" to prop("string", "One of: tap, swipe, click_text, type, back, home, recents"),
-                    "arg1" to prop("string", "X coordinate, text query, or field hint"),
-                    "arg2" to prop("string", "Y coordinate or text to type")
+                    "action" to prop("string", "Action: tap, double_tap, long_press, swipe, scroll_up, scroll_down, scroll_left, scroll_right, click_text, type, type_focused, launch_app, open_url, back, home, recents, notifications, quick_settings, screenshot, wait_ms"),
+                    "arg1" to prop("string", "Primary arg: X coordinate, text/viewId query, app name, URL, wait duration ms, or swipe coords"),
+                    "arg2" to prop("string", "Secondary arg: Y coordinate, text to type, or swipe target")
                 ),
                 required = listOf("action")
+            )
+        ),
+        ToolDeclaration(
+            name = "request_human_intervention",
+            description = "CRITICAL: Call this whenever the agent encounters CAPTCHA, OTP, 2FA, login wall, biometric check, or any step it cannot complete autonomously. Pauses the agent cleanly, pops the Live Screen up inside the Agent Chat Box for the user to solve, and resumes from this exact step once the user taps Resume.",
+            parametersSchema = schema(
+                props = mapOf(
+                    "challenge_type" to prop("string", "e.g., CAPTCHA, OTP, Login Verification, Manual Check"),
+                    "reason" to prop("string", "Short description of why agent paused"),
+                    "target_mode" to prop("string", "'BROWSER' if inside integrated WebView or 'VIRTUAL_HANDS' if inside another Android app"),
+                    "instruction_for_user" to prop("string", "Clear Bangla/English instruction telling the user what to solve before tapping Resume")
+                ),
+                required = listOf("challenge_type", "reason", "target_mode", "instruction_for_user")
             )
         ),
         ToolDeclaration(
@@ -247,10 +287,16 @@ class ToolRegistry(
                 "Confirm downloading file from ${args.optString("url")}",
                 args.toString(2)
             )
+            "app_launch" -> PendingPermissionRequest(
+                toolName,
+                PermissionLevel.CONFIRMATION_REQUIRED,
+                "Confirm opening Android app '${args.optString("app_name_or_package")}' via Virtual Hands",
+                args.toString(2)
+            )
             "device_virtual_hand" -> PendingPermissionRequest(
                 toolName,
                 PermissionLevel.CONFIRMATION_REQUIRED,
-                "Confirm Virtual Hand gesture '${args.optString("action")}' on Android screen",
+                "Confirm Virtual Hand action '${args.optString("action")}' on Android screen",
                 args.toString(2)
             )
             "schedule_automation" -> PendingPermissionRequest(
@@ -358,7 +404,17 @@ class ToolRegistry(
                             ${snap.linksSummary.take(1000)}
                             Forms: ${snap.formsSummary}
                         """.trimIndent()
-                        ToolExecutionOutcome(toolName, true, summary, verified = true)
+                        val challenge = CommandSecurityGuard.detectHumanChallenge(snap.textContent, snap.url)
+                        val intervention = challenge?.let { (cType, cReason) ->
+                            HumanInterventionRequest(
+                                challengeType = cType,
+                                reason = cReason,
+                                targetMode = "BROWSER",
+                                urlOrPackage = snap.url,
+                                instructionForUser = "উপরের লাইভ ব্রাউজার স্ক্রিনে $cType সল্ভ করে 'সল্ভ সম্পন্ন — কাজ শুরু করো' বাটনে ট্যাপ করুন।"
+                            )
+                        }
+                        ToolExecutionOutcome(toolName, true, summary, verified = true, interventionRequest = intervention)
                     },
                     onFailure = { err ->
                         ToolExecutionOutcome(toolName, false, "Browser error: ${err.message}", verified = true)
@@ -382,15 +438,40 @@ class ToolRegistry(
                 val res = browser.downloadFileToWorkspace(url, filename)
                 ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "Download failed" })
             }
+            "app_list" -> {
+                val filter = args.optString("filter").trim()
+                val apps = deviceController.listLaunchableApps()
+                    .filter { filter.isBlank() || it.appName.contains(filter, true) || it.packageName.contains(filter, true) }
+                    .take(60)
+                val out = if (apps.isEmpty()) "No matching launchable apps found."
+                else apps.joinToString("\n") { "${it.appName} -> ${it.packageName} (v${it.versionName})" }
+                ToolExecutionOutcome(toolName, true, out, verified = true)
+            }
+            "app_launch" -> {
+                val query = args.optString("app_name_or_package")
+                val res = deviceController.launchApp(query)
+                ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "Launch failed" })
+            }
             "device_screen_inspect" -> {
                 val res = deviceController.inspectScreen()
                 res.fold(
                     onSuccess = { nodes ->
-                        val text = if (nodes.isEmpty()) "No accessible nodes detected"
-                        else nodes.joinToString("\n") { n ->
-                            "${n.className} text='${n.text}' desc='${n.contentDesc}' center=(${n.centerX.toInt()},${n.centerY.toInt()}) clickable=${n.clickable} editable=${n.editable}"
+                        val pkg = deviceController.activePackage.value
+                        val text = if (nodes.isEmpty()) "Active package: $pkg\nNo accessible nodes detected"
+                        else "Active package: $pkg\n" + nodes.joinToString("\n") { n ->
+                            "${n.className} text='${n.text}' desc='${n.contentDesc}' id='${n.viewId}' center=(${n.centerX.toInt()},${n.centerY.toInt()}) clickable=${n.clickable} editable=${n.editable}"
                         }
-                        ToolExecutionOutcome(toolName, true, text, verified = true)
+                        val challenge = CommandSecurityGuard.detectHumanChallenge(text, pkg)
+                        val intervention = challenge?.let { (cType, cReason) ->
+                            HumanInterventionRequest(
+                                challengeType = cType,
+                                reason = cReason,
+                                targetMode = "VIRTUAL_HANDS",
+                                urlOrPackage = pkg,
+                                instructionForUser = "$pkg অ্যাপে $cType দেখা গেছে। অ্যাপটি ওপেন করে সল্ভ করুন, তারপর চ্যাট বক্সে Resume দিন।"
+                            )
+                        }
+                        ToolExecutionOutcome(toolName, true, text, verified = true, interventionRequest = intervention)
                     },
                     onFailure = { ToolExecutionOutcome(toolName, false, it.message ?: "Accessibility unavailable") }
                 )
@@ -399,15 +480,57 @@ class ToolRegistry(
                 val action = args.optString("action").lowercase()
                 val arg1 = args.optString("arg1")
                 val arg2 = args.optString("arg2")
+                if (action == "wait_ms") {
+                    val ms = (arg1.toLongOrNull() ?: 1200L).coerceIn(200L, 10_000L)
+                    delay(ms)
+                    return ToolExecutionOutcome(toolName, true, "Waited ${ms}ms for UI state settlement", verified = true)
+                }
                 val res = when (action) {
                     "tap" -> deviceController.tap(arg1.toFloatOrNull() ?: 500f, arg2.toFloatOrNull() ?: 500f)
-                    "swipe" -> deviceController.swipe(500f, 1400f, 500f, 400f)
+                    "double_tap" -> deviceController.doubleTap(arg1.toFloatOrNull() ?: 500f, arg2.toFloatOrNull() ?: 500f)
+                    "long_press" -> deviceController.longPress(arg1.toFloatOrNull() ?: 500f, arg2.toFloatOrNull() ?: 500f)
+                    "swipe" -> {
+                        val parts1 = arg1.split(",")
+                        val parts2 = arg2.split(",")
+                        val x1 = parts1.getOrNull(0)?.trim()?.toFloatOrNull() ?: 500f
+                        val y1 = parts1.getOrNull(1)?.trim()?.toFloatOrNull() ?: 1400f
+                        val x2 = parts2.getOrNull(0)?.trim()?.toFloatOrNull() ?: 500f
+                        val y2 = parts2.getOrNull(1)?.trim()?.toFloatOrNull() ?: 400f
+                        deviceController.swipe(x1, y1, x2, y2)
+                    }
+                    "scroll_down" -> deviceController.scroll("down")
+                    "scroll_up" -> deviceController.scroll("up")
+                    "scroll_left" -> deviceController.scroll("left")
+                    "scroll_right" -> deviceController.scroll("right")
                     "click_text" -> deviceController.clickText(arg1)
                     "type" -> deviceController.typeIntoField(arg1, arg2)
-                    "back", "home", "recents", "notifications" -> deviceController.globalNav(action)
+                    "type_focused" -> deviceController.typeIntoField("", arg1.ifBlank { arg2 })
+                    "launch_app" -> deviceController.launchApp(arg1)
+                    "open_url" -> deviceController.openExternalUrl(arg1)
+                    "back", "home", "recents", "notifications", "quick_settings", "screenshot" -> deviceController.globalNav(action)
                     else -> Result.failure(IllegalArgumentException("Unsupported action: $action"))
                 }
                 ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "Gesture failed" })
+            }
+            "request_human_intervention" -> {
+                val cType = args.optString("challenge_type", "Manual Verification")
+                val reason = args.optString("reason", "AI encountered a step requiring user interaction.")
+                val mode = args.optString("target_mode", "BROWSER").uppercase()
+                val instruction = args.optString("instruction_for_user", "লাইভ স্ক্রিনে ধাপটি সম্পন্ন করে Resume দিন।")
+                val targetRef = if (mode == "BROWSER") browser.getActiveTab().url else deviceController.activePackage.value
+                ToolExecutionOutcome(
+                    toolName = toolName,
+                    success = true,
+                    output = "Paused for Human Intervention ($cType): $reason",
+                    verified = true,
+                    interventionRequest = HumanInterventionRequest(
+                        challengeType = cType,
+                        reason = reason,
+                        targetMode = if (mode == "VIRTUAL_HANDS") "VIRTUAL_HANDS" else "BROWSER",
+                        urlOrPackage = targetRef,
+                        instructionForUser = instruction
+                    )
+                )
             }
             "memory_read" -> {
                 val memories = repository.getMemorySnapshot()

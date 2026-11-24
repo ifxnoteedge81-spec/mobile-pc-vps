@@ -2,6 +2,8 @@ package com.example.ai
 
 import org.json.JSONObject
 
+const val AUTO_MODEL_ID = "auto"
+
 enum class TaskComplexity {
     SIMPLE,
     CODING,
@@ -38,9 +40,17 @@ data class AiCompletionResult(
     val completionTokens: Int = 0
 )
 
+data class GeminiModelInfo(
+    val id: String,
+    val displayName: String,
+    val inputTokenLimit: Int,
+    val supportsTools: Boolean = true
+)
+
 data class OpenRouterModelInfo(
     val id: String,
     val name: String,
     val contextLength: Int,
-    val isFree: Boolean
+    val isFree: Boolean,
+    val supportsTools: Boolean = true
 )

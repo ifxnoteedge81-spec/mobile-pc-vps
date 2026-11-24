@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.asStateFlow
 data class ObservedUiNode(
     val text: String,
     val contentDesc: String,
+    val viewId: String = "",
     val className: String,
     val bounds: String,
     val centerX: Float,
@@ -36,6 +37,13 @@ class PersonalAiAccessibilityService : AccessibilityService() {
         val pkg = event?.packageName?.toString()
         if (!pkg.isNullOrBlank()) {
             _activePackage.value = pkg
+            if (!CommandSecurityGuard.isProtectedPackage(pkg)) {
+                rootInActiveWindow?.let { root ->
+                    val collected = mutableListOf<ObservedUiNode>()
+                    traverseNode(root, collected, 30)
+                    _liveNodes.value = collected
+                }
+            }
         }
     }
 
@@ -47,7 +55,7 @@ class PersonalAiAccessibilityService : AccessibilityService() {
         _isConnected.value = false
     }
 
-    fun inspectActiveWindowNodes(maxNodes: Int = 40): Result<List<ObservedUiNode>> {
+    fun inspectActiveWindowNodes(maxNodes: Int = 55): Result<List<ObservedUiNode>> {
         val pkg = _activePackage.value
         if (CommandSecurityGuard.isProtectedPackage(pkg)) {
             return Result.failure(
@@ -58,6 +66,7 @@ class PersonalAiAccessibilityService : AccessibilityService() {
             ?: return Result.failure(IllegalStateException("No active window root available."))
         val collected = mutableListOf<ObservedUiNode>()
         traverseNode(root, collected, maxNodes)
+        _liveNodes.value = collected
         return Result.success(collected)
     }
 
@@ -67,12 +76,14 @@ class PersonalAiAccessibilityService : AccessibilityService() {
         node.getBoundsInScreen(rect)
         val rawText = if (node.isPassword) "[REDACTED_PASSWORD]" else node.text?.toString().orEmpty()
         val desc = node.contentDescription?.toString().orEmpty()
+        val viewId = node.viewIdResourceName?.substringAfterLast("/") ?: ""
 
         if (rawText.isNotBlank() || desc.isNotBlank() || node.isClickable || node.isEditable) {
             out.add(
                 ObservedUiNode(
-                    text = rawText.take(80),
-                    contentDesc = desc.take(80),
+                    text = rawText.take(90),
+                    contentDesc = desc.take(90),
+                    viewId = viewId.take(40),
                     className = node.className?.toString()?.substringAfterLast(".") ?: "View",
                     bounds = "${rect.left},${rect.top},${rect.right},${rect.bottom}",
                     centerX = rect.exactCenterX(),
@@ -121,21 +132,49 @@ class PersonalAiAccessibilityService : AccessibilityService() {
         return dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
     }
 
+    fun performDirectionalScroll(direction: String): Boolean {
+        if (CommandSecurityGuard.isProtectedPackage(_activePackage.value)) return false
+        val dm = resources.displayMetrics
+        val cx = dm.widthPixels / 2f
+        val cy = dm.heightPixels / 2f
+        return when (direction.lowercase()) {
+            "down" -> performSwipe(cx, dm.heightPixels * 0.72f, cx, dm.heightPixels * 0.25f, 380L)
+            "up" -> performSwipe(cx, dm.heightPixels * 0.28f, cx, dm.heightPixels * 0.75f, 380L)
+            "left" -> performSwipe(dm.widthPixels * 0.8f, cy, dm.widthPixels * 0.2f, cy, 320L)
+            "right" -> performSwipe(dm.widthPixels * 0.2f, cy, dm.widthPixels * 0.8f, cy, 320L)
+            else -> performSwipe(cx, dm.heightPixels * 0.72f, cx, dm.heightPixels * 0.25f, 380L)
+        }
+    }
+
     fun setTextByQuery(query: String, text: String): Boolean {
         if (CommandSecurityGuard.isProtectedPackage(_activePackage.value)) return false
         val root = rootInActiveWindow ?: return false
         val target = findEditableOrMatchingNode(root, query.lowercase()) ?: return false
         if (target.isPassword) return false
+        target.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
         val args = Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
         return target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
     }
 
-    fun clickNodeByText(text: String): Boolean {
+    fun setTextInFocusedNode(text: String): Boolean {
         if (CommandSecurityGuard.isProtectedPackage(_activePackage.value)) return false
         val root = rootInActiveWindow ?: return false
-        val matches = root.findAccessibilityNodeInfosByText(text)
+        val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            ?: findEditableOrMatchingNode(root, "")
+            ?: return false
+        if (focused.isPassword) return false
+        val args = Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+        }
+        return focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+    }
+
+    fun clickNodeByText(query: String): Boolean {
+        if (CommandSecurityGuard.isProtectedPackage(_activePackage.value)) return false
+        val root = rootInActiveWindow ?: return false
+        val matches = root.findAccessibilityNodeInfosByText(query)
         for (node in matches) {
             var current: AccessibilityNodeInfo? = node
             while (current != null) {
@@ -145,6 +184,11 @@ class PersonalAiAccessibilityService : AccessibilityService() {
                 current = current.parent
             }
         }
+        // Fallback: check contentDescription or viewIdResourceName across the active tree
+        val altMatch = findClickableByAny(root, query.lowercase())
+        if (altMatch != null) {
+            return altMatch.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        }
         return false
     }
 
@@ -152,12 +196,36 @@ class PersonalAiAccessibilityService : AccessibilityService() {
     fun performSystemHome(): Boolean = performGlobalAction(GLOBAL_ACTION_HOME)
     fun performSystemRecents(): Boolean = performGlobalAction(GLOBAL_ACTION_RECENTS)
     fun performSystemNotifications(): Boolean = performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
+    fun performSystemQuickSettings(): Boolean = performGlobalAction(GLOBAL_ACTION_QUICK_SETTINGS)
+    fun performSystemScreenshot(): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) performGlobalAction(GLOBAL_ACTION_TAKE_SCREENSHOT)
+        else false
+
+    private fun findClickableByAny(node: AccessibilityNodeInfo?, q: String): AccessibilityNodeInfo? {
+        if (node == null) return null
+        val txt = node.text?.toString().orEmpty()
+        val desc = node.contentDescription?.toString().orEmpty()
+        val vid = node.viewIdResourceName.orEmpty()
+        val combined = "$txt $desc $vid".lowercase()
+        if (combined.contains(q) && !node.isPassword) {
+            var p: AccessibilityNodeInfo? = node
+            while (p != null) {
+                if (p.isClickable) return p
+                p = p.parent
+            }
+        }
+        for (i in 0 until node.childCount) {
+            val found = findClickableByAny(node.getChild(i), q)
+            if (found != null) return found
+        }
+        return null
+    }
 
     private fun findEditableOrMatchingNode(node: AccessibilityNodeInfo?, query: String): AccessibilityNodeInfo? {
         if (node == null) return null
         if (node.isEditable && !node.isPassword) {
             val hint = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) node.hintText?.toString().orEmpty() else ""
-            val combined = "${node.text} ${node.contentDescription} $hint".lowercase()
+            val combined = "${node.text} ${node.contentDescription} ${node.viewIdResourceName} $hint".lowercase()
             if (query.isBlank() || combined.contains(query)) return node
         }
         for (i in 0 until node.childCount) {
@@ -177,5 +245,8 @@ class PersonalAiAccessibilityService : AccessibilityService() {
 
         private val _activePackage = MutableStateFlow("None")
         val activePackage: StateFlow<String> = _activePackage.asStateFlow()
+
+        private val _liveNodes = MutableStateFlow<List<ObservedUiNode>>(emptyList())
+        val liveNodes: StateFlow<List<ObservedUiNode>> = _liveNodes.asStateFlow()
     }
 }

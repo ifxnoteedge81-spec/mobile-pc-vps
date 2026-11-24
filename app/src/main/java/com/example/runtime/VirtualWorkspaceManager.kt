@@ -26,6 +26,7 @@ class VirtualWorkspaceManager(baseFilesDir: File) {
     val projectsDir: File = File(rootDir, "projects")
     val scriptsDir: File = File(rootDir, "scripts")
     val downloadsDir: File = File(rootDir, "downloads")
+    val uploadsDir: File = File(rootDir, "uploads")
     val tmpDir: File = File(rootDir, "tmp")
     val memoryDir: File = File(rootDir, "memory")
 
@@ -34,7 +35,7 @@ class VirtualWorkspaceManager(baseFilesDir: File) {
     }
 
     fun ensureStructure() {
-        listOf(rootDir, homeDir, workspaceDir, projectsDir, scriptsDir, downloadsDir, tmpDir, memoryDir)
+        listOf(rootDir, homeDir, workspaceDir, projectsDir, scriptsDir, downloadsDir, uploadsDir, tmpDir, memoryDir)
             .forEach { if (!it.exists()) it.mkdirs() }
         seedStarterFilesIfNeeded()
     }
@@ -221,6 +222,16 @@ class VirtualWorkspaceManager(baseFilesDir: File) {
                 )
             }
             .toList()
+    }
+
+    fun saveUploadedFile(originalName: String, bytes: ByteArray): Result<File> = runCatching {
+        val safeName = originalName.trim()
+            .replace(Regex("[^a-zA-Z0-9._-]"), "_")
+            .ifBlank { "upload_${System.currentTimeMillis()}.bin" }
+        val target = resolveSafe("uploads/${System.currentTimeMillis() % 100000}_$safeName")
+        target.parentFile?.let { if (!it.exists()) it.mkdirs() }
+        target.writeBytes(bytes)
+        target
     }
 
     fun formatTimestamp(millis: Long): String {

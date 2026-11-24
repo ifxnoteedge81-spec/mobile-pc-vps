@@ -23,12 +23,112 @@ class GeminiProvider(
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    val availableModels = listOf(
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
-        "gemini-2.0-flash",
-        "gemini-2.0-flash-lite"
-    )
+    @Volatile
+    private var cachedKeyHash: Int = 0
+    @Volatile
+    private var cachedDiscoveredModels: List<GeminiModelInfo> = emptyList()
+
+    suspend fun fetchAvailableModels(apiKey: String, forceRefresh: Boolean = false): Result<List<GeminiModelInfo>> =
+        withContext(Dispatchers.IO) {
+            val hash = apiKey.hashCode()
+            if (!forceRefresh && cachedKeyHash == hash && cachedDiscoveredModels.isNotEmpty()) {
+                return@withContext Result.success(cachedDiscoveredModels)
+            }
+            runCatching {
+                val request = Request.Builder()
+                    .url("https://generativelanguage.googleapis.com/v1beta/models?pageSize=100")
+                    .addHeader("x-goog-api-key", apiKey)
+                    .get()
+                    .build()
+                client.newCall(request).execute().use { resp ->
+                    val raw = resp.body?.string().orEmpty()
+                    check(resp.isSuccessful) { "Gemini models HTTP ${resp.code}: ${extractError(raw)}" }
+                    auditLogger.log("generativelanguage.googleapis.com", "Gemini Model Discovery", "200 OK", raw.length.toLong())
+                    val arr = JSONObject(raw).optJSONArray("models") ?: JSONArray()
+                    val list = mutableListOf<GeminiModelInfo>()
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.optJSONObject(i) ?: continue
+                        val fullName = obj.optString("name")
+                        val id = fullName.removePrefix("models/")
+                        if (id.isBlank()) continue
+                        val methods = obj.optJSONArray("supportedGenerationMethods") ?: JSONArray()
+                        val supportsGen = (0 until methods.length()).any { methods.optString(it) == "generateContent" }
+                        if (!supportsGen) continue
+                        val lower = id.lowercase()
+                        if (lower.contains("embedding") ||
+                            lower.contains("imagen") ||
+                            lower.contains("veo") ||
+                            lower.contains("tts") ||
+                            lower.contains("audio") ||
+                            lower.contains("robotics") ||
+                            lower.contains("aqa")
+                        ) continue
+                        val displayName = obj.optString("displayName", id)
+                        val inputLimit = obj.optInt("inputTokenLimit", 32768)
+                        list.add(GeminiModelInfo(id = id, displayName = displayName, inputTokenLimit = inputLimit))
+                    }
+                    val sorted = list.sortedByDescending { scoreGeminiModel(it.id, TaskComplexity.MULTISTEP_AGENT, false) }
+                    cachedKeyHash = hash
+                    cachedDiscoveredModels = sorted
+                    sorted
+                }
+            }
+        }
+
+    suspend fun resolveCandidateModels(
+        apiKey: String,
+        requestedModel: String,
+        complexity: TaskComplexity,
+        preferFastOnSimple: Boolean
+    ): List<String> {
+        if (requestedModel.isNotBlank() && requestedModel != AUTO_MODEL_ID) {
+            return listOf(requestedModel)
+        }
+        val discovered = fetchAvailableModels(apiKey).getOrElse { emptyList() }
+        if (discovered.isEmpty()) {
+            return emptyList()
+        }
+        return discovered
+            .sortedByDescending { scoreGeminiModel(it.id, complexity, preferFastOnSimple) }
+            .map { it.id }
+            .distinct()
+    }
+
+    private fun scoreGeminiModel(id: String, complexity: TaskComplexity, preferFast: Boolean): Int {
+        val lower = id.lowercase()
+        var score = 0
+        // Extract version hint dynamically (e.g., 2.5 -> 250, 2.0 -> 200, 3.0 -> 300)
+        val verMatch = Regex("""(\d+)\.(\d+)""").find(lower)
+        if (verMatch != null) {
+            val major = verMatch.groupValues[1].toIntOrNull() ?: 1
+            val minor = verMatch.groupValues[2].toIntOrNull() ?: 0
+            score += major * 1000 + minor * 100
+        }
+        val isLite = lower.contains("lite")
+        val isFlash = lower.contains("flash")
+        val isPro = lower.contains("pro")
+        val isLatestAlias = lower.endsWith("-latest")
+        val isExperimental = lower.contains("exp") || lower.contains("preview")
+
+        score += when (complexity) {
+            TaskComplexity.SIMPLE -> when {
+                preferFast && isFlash && !isLite -> 400
+                preferFast && isLite -> 360
+                isFlash -> 350
+                else -> 200
+            }
+            TaskComplexity.CODING, TaskComplexity.REASONING, TaskComplexity.MULTISTEP_AGENT -> when {
+                preferFast && isFlash -> 380
+                isPro -> 420
+                isFlash && !isLite -> 360
+                else -> 220
+            }
+        }
+        if (isLatestAlias) score += 80
+        if (!isExperimental) score += 40
+        if (lower.contains("deprecated")) score -= 2000
+        return score
+    }
 
     suspend fun generate(
         apiKey: String,

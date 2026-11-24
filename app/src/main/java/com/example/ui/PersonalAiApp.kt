@@ -70,10 +70,14 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PersonalAiApp(viewModel: MainViewModel) {
+fun PersonalAiApp(
+    viewModel: MainViewModel,
+    openLiveAgentSignal: Int = 0
+) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val resources by viewModel.resources.collectAsStateWithLifecycle()
     val agentState by viewModel.agentState.collectAsStateWithLifecycle()
+    val pendingAttachments by viewModel.pendingAttachments.collectAsStateWithLifecycle()
     val terminalLines by viewModel.terminalLines.collectAsStateWithLifecycle()
     val currentShellDir by viewModel.currentShellDir.collectAsStateWithLifecycle()
     val webServerState by viewModel.webServerState.collectAsStateWithLifecycle()
@@ -83,6 +87,7 @@ fun PersonalAiApp(viewModel: MainViewModel) {
     val bookmarks by viewModel.bookmarks.collectAsStateWithLifecycle()
     val accessibilityConnected by viewModel.accessibilityConnected.collectAsStateWithLifecycle()
     val activeWindowPkg by viewModel.activeWindowPackage.collectAsStateWithLifecycle()
+    val liveAccessibilityNodes by viewModel.liveAccessibilityNodes.collectAsStateWithLifecycle()
     val observedNodes by viewModel.observedNodes.collectAsStateWithLifecycle()
     val installedApps by viewModel.installedApps.collectAsStateWithLifecycle()
     val files by viewModel.files.collectAsStateWithLifecycle()
@@ -96,7 +101,9 @@ fun PersonalAiApp(viewModel: MainViewModel) {
     val memories by viewModel.memories.collectAsStateWithLifecycle()
     val automationRules by viewModel.automationRules.collectAsStateWithLifecycle()
     val networkEvents by viewModel.networkEvents.collectAsStateWithLifecycle()
+    val geminiModels by viewModel.geminiModels.collectAsStateWithLifecycle()
     val openRouterModels by viewModel.openRouterModels.collectAsStateWithLifecycle()
+    val lastResolvedModel by viewModel.lastResolvedModel.collectAsStateWithLifecycle()
     val isFetchingModels by viewModel.isFetchingModels.collectAsStateWithLifecycle()
     val providerUsage by viewModel.providerUsage.collectAsStateWithLifecycle()
     val statusBanner by viewModel.statusBanner.collectAsStateWithLifecycle()
@@ -124,6 +131,14 @@ fun PersonalAiApp(viewModel: MainViewModel) {
             restoreState = true
         }
         scope.launch { drawerState.close() }
+    }
+
+    LaunchedEffect(openLiveAgentSignal, agentState.pendingIntervention?.id) {
+        if ((openLiveAgentSignal > 0 || agentState.pendingIntervention != null) &&
+            currentDestination != AppDestination.CommandCenter
+        ) {
+            navigateTo(AppDestination.CommandCenter)
+        }
     }
 
     PersonalAiTheme(themeMode = settings.themeMode) {
@@ -251,11 +266,25 @@ fun PersonalAiApp(viewModel: MainViewModel) {
                                     isOnline = viewModel.isOnline(),
                                     hasAnyApiKey = viewModel.hasSecret(SecretSlot.GEMINI_API_KEY) ||
                                         viewModel.hasSecret(SecretSlot.OPENROUTER_API_KEY),
+                                    pendingAttachments = pendingAttachments,
+                                    browserController = viewModel.browserController,
+                                    browserTabs = browserTabs,
+                                    activeTabId = activeTabId,
+                                    accessibilityConnected = accessibilityConnected,
+                                    activeWindowPackage = activeWindowPkg,
+                                    liveNodes = liveAccessibilityNodes.ifEmpty { observedNodes },
+                                    onAttachFiles = { uris -> viewModel.attachPickedFiles(context, uris) },
+                                    onRemoveAttachment = viewModel::removePendingAttachment,
                                     onSendCommand = viewModel::sendAgentCommand,
                                     onPause = viewModel::pauseAgent,
                                     onResume = viewModel::resumeAgent,
                                     onStop = viewModel::stopAgent,
                                     onResolvePermission = viewModel::resolveAgentPermission,
+                                    onResolveIntervention = viewModel::resolveHumanIntervention,
+                                    onOpenAccessibilitySettings = { viewModel.deviceController.openAccessibilitySettings() },
+                                    onOpenExternalApp = viewModel::openActiveOrTargetApp,
+                                    onInspectDeviceScreen = viewModel::inspectDeviceScreen,
+                                    onQuickVirtualHand = { act -> viewModel.testVirtualHandGesture(act) },
                                     onClearFeed = viewModel::clearAgentFeed,
                                     onOpenModelSettings = { navigateTo(AppDestination.AiModelSettings) }
                                 )
@@ -365,8 +394,9 @@ fun PersonalAiApp(viewModel: MainViewModel) {
                             composable(AppDestination.AiModelSettings.route) {
                                 AiModelSettingsScreen(
                                     settings = settings,
-                                    geminiModels = viewModel.geminiModels,
+                                    geminiModels = geminiModels,
                                     openRouterModels = openRouterModels,
+                                    lastResolvedModel = lastResolvedModel,
                                     isFetchingModels = isFetchingModels,
                                     usageHistory = providerUsage,
                                     geminiKeyMasked = viewModel.getMaskedSecret(SecretSlot.GEMINI_API_KEY),
@@ -374,6 +404,7 @@ fun PersonalAiApp(viewModel: MainViewModel) {
                                     youtubeTokenMasked = viewModel.getMaskedSecret(SecretSlot.YOUTUBE_OAUTH_TOKEN),
                                     onSaveSecret = viewModel::saveSecret,
                                     onDeleteSecret = viewModel::deleteSecret,
+                                    onFetchGeminiModels = viewModel::fetchGeminiModels,
                                     onFetchOpenRouterModels = viewModel::fetchOpenRouterModels,
                                     onSaveProviderConfig = viewModel::updateProviderConfig,
                                     onChangeTheme = viewModel::updateThemeMode

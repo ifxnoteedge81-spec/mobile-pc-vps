@@ -52,6 +52,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.example.ai.AUTO_MODEL_ID
+import com.example.ai.GeminiModelInfo
 import com.example.ai.OpenRouterModelInfo
 import com.example.resources.DeviceResourceSnapshot
 import com.example.security.NetworkEvent
@@ -76,8 +78,9 @@ import kotlin.math.roundToInt
 @Composable
 fun AiModelSettingsScreen(
     settings: AppSettings,
-    geminiModels: List<String>,
+    geminiModels: List<GeminiModelInfo>,
     openRouterModels: List<OpenRouterModelInfo>,
+    lastResolvedModel: String?,
     isFetchingModels: Boolean,
     usageHistory: List<ProviderUsageEntity>,
     geminiKeyMasked: String,
@@ -85,6 +88,7 @@ fun AiModelSettingsScreen(
     youtubeTokenMasked: String,
     onSaveSecret: (SecretSlot, String) -> Unit,
     onDeleteSecret: (SecretSlot) -> Unit,
+    onFetchGeminiModels: () -> Unit,
     onFetchOpenRouterModels: () -> Unit,
     onSaveProviderConfig: (AiProviderType, String, String, Boolean, Boolean, Boolean) -> Unit,
     onChangeTheme: (ThemeMode) -> Unit
@@ -94,8 +98,8 @@ fun AiModelSettingsScreen(
     var ytTokenInput by remember { mutableStateOf("") }
 
     var provider by remember(settings.preferredProvider) { mutableStateOf(settings.preferredProvider) }
-    var selectedGemini by remember(settings.geminiModel) { mutableStateOf(settings.geminiModel) }
-    var selectedOpenRouter by remember(settings.openRouterModel) { mutableStateOf(settings.openRouterModel) }
+    var selectedGemini by remember(settings.geminiModel) { mutableStateOf(settings.geminiModel.ifBlank { AUTO_MODEL_ID }) }
+    var selectedOpenRouter by remember(settings.openRouterModel) { mutableStateOf(settings.openRouterModel.ifBlank { AUTO_MODEL_ID }) }
     var streaming by remember(settings.streamingEnabled) { mutableStateOf(settings.streamingEnabled) }
     var autoFallback by remember(settings.autoFallbackEnabled) { mutableStateOf(settings.autoFallbackEnabled) }
     var preferFree by remember(settings.preferFreeModelsOnSimpleTasks) { mutableStateOf(settings.preferFreeModelsOnSimpleTasks) }
@@ -181,7 +185,22 @@ fun AiModelSettingsScreen(
         // Model Router Settings
         item {
             GlassOsCard {
-                Text("AI Model Router & Selection", style = MaterialTheme.typography.titleMedium)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("AI Model Router & Auto Selection", style = MaterialTheme.typography.titleMedium)
+                    if (!lastResolvedModel.isNullOrBlank()) {
+                        StatusBadge(label = "Live: $lastResolvedModel", color = NeuralCyan)
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Auto মোড থাকলে আপনার Gemini এবং OpenRouter API Key অনুযায়ী লাইভ সার্ভার থেকে সেরা উপযুক্ত মডেল অটোমেটিক সিলেক্ট হয়।",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 Spacer(Modifier.height(8.dp))
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(AiProviderType.entries) { p ->
@@ -193,13 +212,31 @@ fun AiModelSettingsScreen(
                     }
                 }
                 Spacer(Modifier.height(10.dp))
-                Text("Gemini Model", style = MaterialTheme.typography.labelLarge)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Gemini Model (API Driven)", style = MaterialTheme.typography.labelLarge)
+                    OutlinedButton(onClick = onFetchGeminiModels, enabled = !isFetchingModels) {
+                        Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(if (isFetchingModels) "Checking..." else "Discover")
+                    }
+                }
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(geminiModels) { m ->
+                    item {
                         FilterChip(
-                            selected = selectedGemini == m,
-                            onClick = { selectedGemini = m },
-                            label = { Text(m) }
+                            selected = selectedGemini == AUTO_MODEL_ID,
+                            onClick = { selectedGemini = AUTO_MODEL_ID },
+                            label = { Text("Auto (API অনুযায়ী সিলেক্ট)") }
+                        )
+                    }
+                    items(geminiModels, key = { it.id }) { m ->
+                        FilterChip(
+                            selected = selectedGemini == m.id,
+                            onClick = { selectedGemini = m.id },
+                            label = { Text(m.id) }
                         )
                     }
                 }
@@ -209,7 +246,7 @@ fun AiModelSettingsScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("OpenRouter Models", style = MaterialTheme.typography.labelLarge)
+                    Text("OpenRouter Model (API Driven)", style = MaterialTheme.typography.labelLarge)
                     Row {
                         FilterChip(
                             selected = onlyFreeFilter,
@@ -226,7 +263,14 @@ fun AiModelSettingsScreen(
                 }
                 val visibleOrModels = openRouterModels.filter { !onlyFreeFilter || it.isFree }.take(25)
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(visibleOrModels) { m ->
+                    item {
+                        FilterChip(
+                            selected = selectedOpenRouter == AUTO_MODEL_ID,
+                            onClick = { selectedOpenRouter = AUTO_MODEL_ID },
+                            label = { Text("Auto (API অনুযায়ী সিলেক্ট)") }
+                        )
+                    }
+                    items(visibleOrModels, key = { it.id }) { m ->
                         FilterChip(
                             selected = selectedOpenRouter == m.id,
                             onClick = { selectedOpenRouter = m.id },

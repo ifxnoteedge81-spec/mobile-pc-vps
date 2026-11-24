@@ -75,4 +75,25 @@ object CommandSecurityGuard {
         )
         return protectedHints.any { lower.contains(it) }
     }
+
+    fun detectHumanChallenge(text: String, urlOrPkg: String = ""): Pair<String, String>? {
+        val lower = "$text $urlOrPkg".lowercase()
+        val captchaHints = listOf(
+            "captcha", "recaptcha", "hcaptcha", "i'm not a robot", "i am not a robot",
+            "verify you are human", "checking your browser", "cf-challenge", "turnstile",
+            "ক্যাপচা", "মানুষ কিনা যাচাই"
+        )
+        if (captchaHints.any { lower.contains(it) }) {
+            return "CAPTCHA" to "CAPTCHA বা মানব-যাচাইকরণ (Human Verification) ধরা পড়েছে।"
+        }
+        val otpHints = listOf(
+            "enter otp", "one-time password", "verification code", "6-digit code",
+            "2-step verification", "two-factor", "resend code", "sms code",
+            "ওটিপি", "ভেরিফিকেশন কোড"
+        )
+        if (otpHints.any { lower.contains(it) }) {
+            return "OTP / 2FA" to "OTP বা ২-ধাপ ভেরিফিকেশন কোড চাওয়া হয়েছে।"
+        }
+        return null
+    }
 }

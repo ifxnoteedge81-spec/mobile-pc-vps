@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.ai.AUTO_MODEL_ID
 import com.example.ui.theme.ThemeMode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -27,8 +28,8 @@ enum class PowerProfile(val label: String) {
 data class AppSettings(
     val themeMode: ThemeMode = ThemeMode.DARK,
     val preferredProvider: AiProviderType = AiProviderType.AUTO,
-    val geminiModel: String = "gemini-2.5-flash",
-    val openRouterModel: String = "google/gemini-2.0-flash-exp:free",
+    val geminiModel: String = AUTO_MODEL_ID,
+    val openRouterModel: String = AUTO_MODEL_ID,
     val streamingEnabled: Boolean = true,
     val autoFallbackEnabled: Boolean = true,
     val preferFreeModelsOnSimpleTasks: Boolean = true,
@@ -60,8 +61,8 @@ class SettingsDataStore(private val context: Context) {
         AppSettings(
             themeMode = runCatching { ThemeMode.valueOf(prefs[Keys.THEME_MODE] ?: "DARK") }.getOrDefault(ThemeMode.DARK),
             preferredProvider = runCatching { AiProviderType.valueOf(prefs[Keys.PREFERRED_PROVIDER] ?: "AUTO") }.getOrDefault(AiProviderType.AUTO),
-            geminiModel = prefs[Keys.GEMINI_MODEL] ?: "gemini-2.5-flash",
-            openRouterModel = prefs[Keys.OPENROUTER_MODEL] ?: "google/gemini-2.0-flash-exp:free",
+            geminiModel = prefs[Keys.GEMINI_MODEL]?.takeIf { it.isNotBlank() } ?: AUTO_MODEL_ID,
+            openRouterModel = prefs[Keys.OPENROUTER_MODEL]?.takeIf { it.isNotBlank() } ?: AUTO_MODEL_ID,
             streamingEnabled = prefs[Keys.STREAMING] ?: true,
             autoFallbackEnabled = prefs[Keys.AUTO_FALLBACK] ?: true,
             preferFreeModelsOnSimpleTasks = prefs[Keys.PREFER_FREE] ?: true,

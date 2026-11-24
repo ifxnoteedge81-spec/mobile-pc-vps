@@ -27,6 +27,7 @@ enum class FeedEntryKind {
     AI_REASONING,
     VERIFIED_TOOL_RESULT,
     PERMISSION_REQUEST,
+    HUMAN_INTERVENTION,
     ERROR_NOTICE
 }
 
@@ -47,6 +48,7 @@ data class AgentRuntimeState(
     val activeModelLabel: String = "",
     val feed: List<CommandFeedItem> = emptyList(),
     val pendingPermission: PendingPermissionRequest? = null,
+    val pendingIntervention: HumanInterventionRequest? = null,
     val streamingBuffer: String = ""
 )
 
@@ -57,27 +59,37 @@ class AutonomousAgentEngine(
     private val repository: AgentRepository,
     private val linuxEnv: LocalLinuxEnvironment,
     private val resourceManager: DeviceResourceManager,
-    private val settingsFlow: kotlinx.coroutines.flow.Flow<AppSettings>
+    private val settingsFlow: kotlinx.coroutines.flow.Flow<AppSettings>,
+    private val onInterventionAlert: (HumanInterventionRequest) -> Unit = {}
 ) {
     private val _state = MutableStateFlow(AgentRuntimeState())
     val state: StateFlow<AgentRuntimeState> = _state.asStateFlow()
 
     private var activeJob: Job? = null
     private var permissionDeferred: CompletableDeferred<Boolean>? = null
+    private var interventionDeferred: CompletableDeferred<String>? = null
 
-    fun submitCommand(userPrompt: String) {
+    fun submitCommand(
+        userPrompt: String,
+        attachments: List<AgentUploadedAttachment> = emptyList()
+    ) {
         val trimmed = userPrompt.trim()
-        if (trimmed.isEmpty()) return
+        if (trimmed.isEmpty() && attachments.isEmpty()) return
 
         // Support instant local slash commands even when completely offline
-        if (trimmed.startsWith("/sh ") || trimmed.startsWith("/py ")) {
+        if (attachments.isEmpty() && (trimmed.startsWith("/sh ") || trimmed.startsWith("/py "))) {
             runDirectLocalShortcut(trimmed)
             return
         }
 
         activeJob?.cancel()
+        permissionDeferred?.complete(false)
+        permissionDeferred = null
+        interventionDeferred?.complete("CANCELLED")
+        interventionDeferred = null
+
         activeJob = scope.launch(Dispatchers.IO) {
-            runAgentCycle(trimmed)
+            runAgentCycle(trimmed, attachments)
         }
     }
 
@@ -93,6 +105,8 @@ class AutonomousAgentEngine(
         activeJob?.cancel()
         permissionDeferred?.complete(false)
         permissionDeferred = null
+        interventionDeferred?.complete("CANCELLED")
+        interventionDeferred = null
         val id = _state.value.activeTaskId
         if (id != null) {
             scope.launch(Dispatchers.IO) {
@@ -108,6 +122,7 @@ class AutonomousAgentEngine(
                 isPaused = false,
                 taskStatus = TaskStatus.CANCELLED,
                 pendingPermission = null,
+                pendingIntervention = null,
                 currentPhaseLabel = "Cancelled",
                 streamingBuffer = ""
             )
@@ -118,6 +133,21 @@ class AutonomousAgentEngine(
         permissionDeferred?.complete(approved)
         permissionDeferred = null
         _state.update { it.copy(pendingPermission = null) }
+    }
+
+    fun resolveHumanIntervention(userNote: String = "") {
+        val note = userNote.trim().ifBlank {
+            "User solved the CAPTCHA / OTP / verification challenge on the Live Screen. Inspect updated page/screen and continue from this step."
+        }
+        interventionDeferred?.complete(note)
+        interventionDeferred = null
+        _state.update {
+            it.copy(
+                pendingIntervention = null,
+                taskStatus = TaskStatus.RUNNING,
+                currentPhaseLabel = "Resuming from human-solved step..."
+            )
+        }
     }
 
     fun clearFeed() {
@@ -147,15 +177,37 @@ class AutonomousAgentEngine(
         }
     }
 
-    private suspend fun runAgentCycle(userPrompt: String) {
+    private suspend fun runAgentCycle(
+        userPrompt: String,
+        attachments: List<AgentUploadedAttachment>
+    ) {
         val settings = settingsFlow.first()
         val resources = resourceManager.refresh(settings)
         val modelLabel = router.getActiveLabel(settings)
 
-        appendFeed(FeedEntryKind.USER_COMMAND, "User Command", userPrompt)
+        val displayUserText = buildString {
+            append(userPrompt.ifBlank { "Analyze attached files." })
+            if (attachments.isNotEmpty()) {
+                append("\n\n[Attached Files: ${attachments.joinToString(", ") { it.displayName }}]")
+            }
+        }
+        val enrichedPrompt = buildString {
+            append(userPrompt.ifBlank { "Please inspect and analyze the uploaded files below." })
+            if (attachments.isNotEmpty()) {
+                append("\n\n=== USER UPLOADED FILES IN virtual_env/ ===")
+                attachments.forEach { att ->
+                    append("\n- Name: ${att.displayName} | Path: ${att.relativePath} | Type: ${att.mimeType} | Size: ${att.sizeBytes}B")
+                    if (!att.textExcerpt.isNullOrBlank()) {
+                        append("\n  Content Preview:\n  ${att.textExcerpt.take(2500)}")
+                    }
+                }
+            }
+        }
+
+        appendFeed(FeedEntryKind.USER_COMMAND, "User Command", displayUserText)
         val taskId = repository.createTask(
-            title = userPrompt.take(70),
-            prompt = userPrompt,
+            title = displayUserText.take(70),
+            prompt = displayUserText,
             modelUsed = modelLabel
         )
 
@@ -165,8 +217,9 @@ class AutonomousAgentEngine(
                 taskStatus = TaskStatus.PLANNING,
                 isBusy = true,
                 isPaused = false,
+                pendingIntervention = null,
                 activeModelLabel = modelLabel,
-                currentPhaseLabel = "Step 1/4: Analyzing objective & local memory...",
+                currentPhaseLabel = "Step 1: Analyzing objective, uploads & live API...",
                 streamingBuffer = ""
             )
         }
@@ -181,16 +234,17 @@ class AutonomousAgentEngine(
 
         val systemPrompt = """
             You are PERSONAL AI COMPUTER, an autonomous local-first Android AI Agent Engine inspired by OpenClaw.
-            You control real on-device tools inside a sandboxed Linux workspace (virtual_env), an on-device Python & JS V8 runtime, an integrated Chromium WebView browser, and authorized Android Accessibility Virtual Hands.
+            You control real on-device tools inside a sandboxed Linux workspace (virtual_env), an on-device Python & JS V8 runtime, an integrated Chromium WebView browser, and full Android Accessibility Virtual Hands (app_list, app_launch, device_screen_inspect, device_virtual_hand).
 
             CRITICAL RULES:
             1. Support both Bangla and English seamlessly. Reply in the same language the user used (Bangla or English).
             2. NEVER fabricate tool outputs, file creation, web searches, or command results. ALWAYS call the real tools and observe their actual outputs before reporting completion.
             3. Follow the 3-Tier Permission Policy:
-               - Level 1 (Safe): workspace read/write, safe shell/python/js, public web browsing/reading.
-               - Level 2 (Confirmation): deleting files, filling forms, downloading files, Virtual Hand device gestures, scheduling automations.
+               - Level 1 (Safe): workspace read/write (including uploaded files in uploads/), safe shell/python/js, public web browsing/reading, inspecting screen.
+               - Level 2 (Confirmation): deleting files, filling forms, downloading files, Virtual Hand device gestures, launching apps, scheduling automations.
                - Level 3 (Restricted): NEVER bypass login, OTP, CAPTCHA, biometrics, banking, or execute destructive OS commands.
-            4. Distinguish clearly between verified tool observations and recommendations.
+            4. HUMAN-IN-THE-LOOP PAUSE & RESUME:
+               Whenever you encounter a CAPTCHA, OTP, 2FA, login gate, or any interactive check that you cannot or must not bypass yourself, IMMEDIATELY call `request_human_intervention` so the Live Screen pops up inside the user's Agent Chat Box. When the user resolves it and clicks Resume, inspect the updated browser/screen state and continue seamlessly from that exact step!
             5. Keep responses concise, structured, and actionable.
 
             Current Device State:
@@ -203,9 +257,9 @@ class AutonomousAgentEngine(
         """.trimIndent()
 
         val conversation = mutableListOf(
-            AiMessage(role = "user", content = userPrompt)
+            AiMessage(role = "user", content = enrichedPrompt)
         )
-        val complexity = classifyComplexity(userPrompt)
+        val complexity = classifyComplexity(enrichedPrompt)
         val declarations = toolRegistry.getDeclarations()
 
         var step = 1
@@ -213,14 +267,14 @@ class AutonomousAgentEngine(
         var finalText = ""
 
         try {
-            val maxIterations = if (settings.lowResourceMode) 4 else 8
+            val maxIterations = if (settings.lowResourceMode) 5 else 10
             while (step <= maxIterations) {
                 waitWhilePaused()
 
                 _state.update {
                     it.copy(
                         taskStatus = TaskStatus.RUNNING,
-                        currentPhaseLabel = "Iteration $step: Reasoning & selecting tools...",
+                        currentPhaseLabel = "Iteration $step: Selecting API model & planning...",
                         streamingBuffer = ""
                     )
                 }
@@ -251,6 +305,7 @@ class AutonomousAgentEngine(
 
                 val completion = completionResult.getOrThrow()
                 totalTokens += completion.promptTokens + completion.completionTokens
+                _state.update { it.copy(activeModelLabel = "${completion.provider} • ${completion.model}") }
 
                 if (completion.text.isNotBlank() && completion.toolCalls.isNotEmpty()) {
                     repository.appendLog(taskId, step, "PLAN", "Agent Plan", completion.text)
@@ -260,7 +315,7 @@ class AutonomousAgentEngine(
                 if (completion.toolCalls.isEmpty()) {
                     finalText = completion.text.ifBlank { "Task completed." }
                     repository.appendLog(taskId, step, "AI_RESPONSE", "Final Report", finalText, verified = true)
-                    appendFeed(FeedEntryKind.AI_REASONING, "Final Report (${completion.provider})", finalText)
+                    appendFeed(FeedEntryKind.AI_REASONING, "Final Report (${completion.provider} • ${completion.model})", finalText)
                     break
                 }
 
@@ -315,10 +370,27 @@ class AutonomousAgentEngine(
                         body = outcome.output.take(1200)
                     )
 
+                    var finalToolOutput = outcome.output
+                    outcome.interventionRequest?.let { req ->
+                        appendFeed(
+                            kind = FeedEntryKind.HUMAN_INTERVENTION,
+                            title = "লাইভ স্ক্রিন প্রয়োজন: ${req.challengeType}",
+                            body = "${req.reason}\n${req.instructionForUser}"
+                        )
+                        repository.appendLog(taskId, step, "INTERVENTION", req.challengeType, req.reason)
+                        val userResolution = awaitHumanIntervention(req)
+                        appendFeed(
+                            kind = FeedEntryKind.USER_COMMAND,
+                            title = "মানব-সমাধান সম্পন্ন (Resumed)",
+                            body = userResolution
+                        )
+                        finalToolOutput = "${outcome.output}\n\n[HUMAN_INTERVENTION_RESOLVED]: $userResolution"
+                    }
+
                     conversation.add(
                         AiMessage(
                             role = "tool",
-                            content = outcome.output.take(4000),
+                            content = finalToolOutput.take(4000),
                             toolCallId = call.id,
                             toolName = call.name
                         )
@@ -345,6 +417,7 @@ class AutonomousAgentEngine(
                 it.copy(
                     isBusy = false,
                     taskStatus = TaskStatus.COMPLETED,
+                    pendingIntervention = null,
                     currentPhaseLabel = "Completed ($totalTokens tokens)",
                     streamingBuffer = ""
                 )
@@ -358,7 +431,13 @@ class AutonomousAgentEngine(
             }
             appendFeed(FeedEntryKind.ERROR_NOTICE, "Agent Error", msg)
             _state.update {
-                it.copy(isBusy = false, taskStatus = TaskStatus.FAILED, currentPhaseLabel = "Error", streamingBuffer = "")
+                it.copy(
+                    isBusy = false,
+                    taskStatus = TaskStatus.FAILED,
+                    pendingIntervention = null,
+                    currentPhaseLabel = "Error",
+                    streamingBuffer = ""
+                )
             }
         }
     }
@@ -367,6 +446,20 @@ class AutonomousAgentEngine(
         val deferred = CompletableDeferred<Boolean>()
         permissionDeferred = deferred
         _state.update { it.copy(pendingPermission = request) }
+        return deferred.await()
+    }
+
+    private suspend fun awaitHumanIntervention(request: HumanInterventionRequest): String {
+        val deferred = CompletableDeferred<String>()
+        interventionDeferred = deferred
+        _state.update {
+            it.copy(
+                pendingIntervention = request,
+                taskStatus = TaskStatus.PAUSED,
+                currentPhaseLabel = "⏸️ সল্ভ করুন: ${request.challengeType} (Live Screen)"
+            )
+        }
+        onInterventionAlert(request)
         return deferred.await()
     }
 
@@ -386,7 +479,7 @@ class AutonomousAgentEngine(
         val lower = prompt.lowercase()
         return when {
             lower.contains("script") || lower.contains("python") || lower.contains("code") || lower.contains("html") -> TaskComplexity.CODING
-            lower.contains("job") || lower.contains("youtube") || lower.contains("research") || lower.contains("automate") -> TaskComplexity.MULTISTEP_AGENT
+            lower.contains("job") || lower.contains("youtube") || lower.contains("research") || lower.contains("automate") || lower.contains("virtual hand") -> TaskComplexity.MULTISTEP_AGENT
             lower.length > 160 -> TaskComplexity.REASONING
             else -> TaskComplexity.SIMPLE
         }

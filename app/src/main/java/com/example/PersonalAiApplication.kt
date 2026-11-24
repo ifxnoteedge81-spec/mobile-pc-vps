@@ -67,7 +67,14 @@ class AppContainer(context: Context) {
         repository = repository,
         linuxEnv = linuxEnv,
         resourceManager = resourceManager,
-        settingsFlow = settingsStore.settings
+        settingsFlow = settingsStore.settings,
+        onInterventionAlert = { req ->
+            com.example.scheduler.AgentForegroundService.postInterventionNotification(
+                context = context,
+                challengeType = req.challengeType,
+                reason = req.reason
+            )
+        }
     )
 }
 

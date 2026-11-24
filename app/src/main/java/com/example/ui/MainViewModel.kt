@@ -3,12 +3,15 @@ package com.example.ui
 import android.app.Application
 import android.content.Context
 import android.net.Uri
+import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.PersonalAiApplication
 import com.example.accessibility.InstalledAppSummary
 import com.example.accessibility.ObservedUiNode
 import com.example.agent.AgentRuntimeState
+import com.example.agent.AgentUploadedAttachment
+import com.example.ai.GeminiModelInfo
 import com.example.ai.OpenRouterModelInfo
 import com.example.browser.BrowserTab
 import com.example.browser.PageSnapshot
@@ -17,6 +20,7 @@ import com.example.runtime.ScriptExecutionResult
 import com.example.runtime.TerminalLine
 import com.example.runtime.WebServerState
 import com.example.runtime.WorkspaceFileItem
+import com.example.scheduler.AgentForegroundService
 import com.example.security.NetworkEvent
 import com.example.security.SecureKeyStore.SecretSlot
 import com.example.storage.AgentMemoryEntity
@@ -34,8 +38,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -59,6 +63,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val accessibilityConnected: StateFlow<Boolean> = container.deviceController.accessibilityConnected
     val activeWindowPackage: StateFlow<String> = container.deviceController.activePackage
+    val liveAccessibilityNodes: StateFlow<List<ObservedUiNode>> = container.deviceController.liveNodes
     val networkEvents: StateFlow<List<NetworkEvent>> = container.auditLogger.events
 
     val tasks: StateFlow<List<AgentTaskEntity>> = container.repository.tasks
@@ -90,16 +95,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _editorRunOutput = MutableStateFlow<ScriptExecutionResult?>(null)
     val editorRunOutput: StateFlow<ScriptExecutionResult?> = _editorRunOutput.asStateFlow()
 
+    // Agent Box file attachments
+    private val _pendingAttachments = MutableStateFlow<List<AgentUploadedAttachment>>(emptyList())
+    val pendingAttachments: StateFlow<List<AgentUploadedAttachment>> = _pendingAttachments.asStateFlow()
+
     // Terminal Level 2 confirmation prompt
     private val _pendingShellConfirmation = MutableStateFlow<String?>(null)
     val pendingShellConfirmation: StateFlow<String?> = _pendingShellConfirmation.asStateFlow()
 
-    // OpenRouter model list
-    private val _openRouterModels = MutableStateFlow(container.openRouterProvider.curatedModels)
+    // Live API-discovered model lists (no hardcoded model requirement)
+    private val _geminiModels = MutableStateFlow<List<GeminiModelInfo>>(emptyList())
+    val geminiModels: StateFlow<List<GeminiModelInfo>> = _geminiModels.asStateFlow()
+
+    private val _openRouterModels = MutableStateFlow<List<OpenRouterModelInfo>>(emptyList())
     val openRouterModels: StateFlow<List<OpenRouterModelInfo>> = _openRouterModels.asStateFlow()
 
     private val _isFetchingModels = MutableStateFlow(false)
     val isFetchingModels: StateFlow<Boolean> = _isFetchingModels.asStateFlow()
+
+    val lastResolvedModel: StateFlow<String?> = container.aiRouter.lastResolvedModel
 
     // Virtual Hands inspector state
     private val _observedNodes = MutableStateFlow<List<ObservedUiNode>>(emptyList())
@@ -113,7 +127,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val browserController get() = container.browserController
     val deviceController get() = container.deviceController
-    val geminiModels get() = container.geminiProvider.availableModels
     val ramBudgetPresets get() = container.resourceManager.presetRamBudgetsMb
 
     init {
@@ -139,6 +152,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun saveSecret(slot: SecretSlot, value: String) {
         container.keyStore.saveSecret(slot, value)
         showBanner("${slot.label} encrypted in Android Keystore.")
+        if (slot == SecretSlot.GEMINI_API_KEY) fetchGeminiModels()
+        if (slot == SecretSlot.OPENROUTER_API_KEY) fetchOpenRouterModels()
     }
 
     fun deleteSecret(slot: SecretSlot) {
@@ -198,6 +213,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun fetchGeminiModels() {
+        viewModelScope.launch {
+            val key = container.keyStore.getSecret(SecretSlot.GEMINI_API_KEY)
+            if (key.isNullOrBlank()) {
+                showBanner("Add a Gemini API key first to discover live models.")
+                return@launch
+            }
+            _isFetchingModels.value = true
+            container.geminiProvider.fetchAvailableModels(key, forceRefresh = true).fold(
+                onSuccess = { list ->
+                    _geminiModels.value = list
+                    showBanner("Discovered ${list.size} live Gemini models from your API key.")
+                },
+                onFailure = { err ->
+                    showBanner("Gemini discovery failed: ${err.message}")
+                }
+            )
+            _isFetchingModels.value = false
+        }
+    }
+
     fun fetchOpenRouterModels() {
         viewModelScope.launch {
             _isFetchingModels.value = true
@@ -217,12 +253,78 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // Agent Commands
-    fun sendAgentCommand(prompt: String) = container.agentEngine.submitCommand(prompt)
+    // Agent Box File Upload & Commands
+    fun attachPickedFiles(context: Context, uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val added = mutableListOf<AgentUploadedAttachment>()
+            for (uri in uris) {
+                runCatching {
+                    val resolver = context.contentResolver
+                    val mime = resolver.getType(uri) ?: "application/octet-stream"
+                    val name = queryDisplayName(context, uri) ?: "file_${System.currentTimeMillis()}"
+                    val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: ByteArray(0)
+                    require(bytes.size <= 10 * 1024 * 1024) { "$name exceeds 10MB upload limit" }
+                    val savedFile = container.workspaceManager.saveUploadedFile(name, bytes).getOrThrow()
+                    val relPath = container.workspaceManager.relativePathOf(savedFile)
+                    val isTextLike = mime.startsWith("text/") ||
+                        name.substringAfterLast('.', "").lowercase() in setOf(
+                            "txt", "md", "csv", "json", "py", "js", "ts", "html", "css", "xml", "yaml", "yml", "sh", "log", "kt", "java"
+                        )
+                    val excerpt = if (isTextLike && bytes.isNotEmpty()) {
+                        bytes.decodeToString().take(3000)
+                    } else null
+                    AgentUploadedAttachment(
+                        displayName = name,
+                        relativePath = relPath,
+                        mimeType = mime,
+                        sizeBytes = bytes.size.toLong(),
+                        textExcerpt = excerpt
+                    )
+                }.onSuccess { added.add(it) }
+                    .onFailure { showBanner("Upload error: ${it.message}") }
+            }
+            if (added.isNotEmpty()) {
+                _pendingAttachments.update { it + added }
+                refreshFiles()
+                showBanner("${added.size}টি ফাইল এজেন্ট ওয়ার্কস্পেসে আপলোড হয়েছে।")
+            }
+        }
+    }
+
+    fun removePendingAttachment(id: String) {
+        _pendingAttachments.update { list -> list.filterNot { it.id == id } }
+    }
+
+    private fun queryDisplayName(context: Context, uri: Uri): String? {
+        return runCatching {
+            context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0) else null
+            }
+        }.getOrNull()
+    }
+
+    fun sendAgentCommand(prompt: String) {
+        val currentAttachments = _pendingAttachments.value
+        container.agentEngine.submitCommand(prompt, currentAttachments)
+        if (currentAttachments.isNotEmpty()) {
+            _pendingAttachments.value = emptyList()
+        }
+    }
+
     fun pauseAgent() = container.agentEngine.pauseTask()
     fun resumeAgent() = container.agentEngine.resumeTask()
-    fun stopAgent() = container.agentEngine.stopTask()
+    fun stopAgent() {
+        AgentForegroundService.clearInterventionNotification(getApplication())
+        container.agentEngine.stopTask()
+    }
     fun resolveAgentPermission(approved: Boolean) = container.agentEngine.resolvePermission(approved)
+
+    fun resolveHumanIntervention(userNote: String = "") {
+        AgentForegroundService.clearInterventionNotification(getApplication())
+        container.agentEngine.resolveHumanIntervention(userNote)
+    }
+
     fun clearAgentFeed() = container.agentEngine.clearFeed()
 
     fun deleteTask(taskId: Long) {
@@ -347,7 +449,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
                 val resolver = context.contentResolver
-                val name = "imported_${System.currentTimeMillis()}.txt"
+                val name = queryDisplayName(context, uri) ?: "imported_${System.currentTimeMillis()}.txt"
                 val content = resolver.openInputStream(uri)?.use { it.bufferedReader().readText() } ?: ""
                 container.workspaceManager.writeTextFile("workspace/$name", content).getOrThrow()
                 name
@@ -433,12 +535,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val res = when (action) {
             "tap" -> container.deviceController.tap(x, y)
             "swipe" -> container.deviceController.swipe(500f, 1200f, 500f, 500f)
+            "scroll_down" -> container.deviceController.scroll("down")
+            "scroll_up" -> container.deviceController.scroll("up")
             else -> container.deviceController.globalNav(action)
         }
         res.fold(
             onSuccess = { showBanner(it) },
             onFailure = { showBanner(it.message ?: "Gesture failed") }
         )
+    }
+
+    fun openActiveOrTargetApp(pkgHint: String? = null) {
+        val res = if (!pkgHint.isNullOrBlank() && pkgHint != "None" && pkgHint != getApplication<Application>().packageName) {
+            container.deviceController.launchApp(pkgHint)
+        } else {
+            container.deviceController.openActiveOrLastApp()
+        }
+        res.onFailure { showBanner(it.message ?: "Cannot switch to target app") }
     }
 
     fun loadInstalledApps() {
