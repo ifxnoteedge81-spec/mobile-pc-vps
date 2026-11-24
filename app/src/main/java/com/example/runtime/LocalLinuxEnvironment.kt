@@ -205,9 +205,19 @@ class LocalLinuxEnvironment(
                 pb.environment()["PWD"] = currentDir.absolutePath
 
                 val process = pb.start()
-                val finished = process.waitFor(12, TimeUnit.SECONDS)
+                val finished = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    process.waitFor(12, TimeUnit.SECONDS)
+                } else {
+                    val waiter = Thread { runCatching { process.waitFor() } }.apply { start() }
+                    waiter.join(12_000L)
+                    !waiter.isAlive
+                }
                 if (!finished) {
-                    process.destroyForcibly()
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        process.destroyForcibly()
+                    } else {
+                        process.destroy()
+                    }
                     return@runCatching ShellExecutionResult(
                         124,
                         "",

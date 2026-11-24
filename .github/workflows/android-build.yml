@@ -2,7 +2,10 @@ name: Android Build & Netlify APK Deploy
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "master"]
+    paths-ignore:
+      - "site/downloads/version.json"
+      - "site/downloads/personal-ai-computer.apk.sha256"
     tags: ["v*"]
   workflow_dispatch:
 
@@ -16,27 +19,36 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Setup Gradle
+      - name: Setup Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "8.13"
+          gradle-version: "9.3.1"
+
+      - name: Ensure debug.keystore exists for Gradle debugConfig
+        run: |
+          if [ ! -f debug.keystore ]; then
+            keytool -genkeypair -v \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
 
       - name: Run unit tests & lint
-        run: |
-          if [ -x ./gradlew ]; then
-            ./gradlew testDebugUnitTest lintDebug
-          else
-            gradle testDebugUnitTest lintDebug
-          fi
+        run: gradle testDebugUnitTest lintDebug
 
       - name: Configure release signing if secrets are present
         id: signing
@@ -63,7 +75,7 @@ jobs:
             gradle assembleDebug
           fi
 
-      - name: Verify APK, compute SHA-256 & prepare Netlify payload
+      - name: Verify APK, compute SHA-256 & prepare release metadata
         id: package
         run: |
           if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
@@ -71,7 +83,7 @@ jobs:
             BUILD_TYPE="signed-release"
           else
             APK_SRC="app/build/outputs/apk/debug/app-debug.apk"
-            BUILD_TYPE="debug-unsigned-fallback"
+            BUILD_TYPE="debug-build"
           fi
 
           if [ ! -f "$APK_SRC" ]; then
@@ -86,28 +98,39 @@ jobs:
           VERSION_TAG="${GITHUB_REF_NAME:-main}-${GITHUB_RUN_NUMBER}"
           RELEASE_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            RELEASE_TAG="${GITHUB_REF_NAME}"
+          else
+            RELEASE_TAG="latest"
+          fi
+          RELEASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/personal-ai-computer.apk"
+
           echo "$SHA256  personal-ai-computer.apk" > site/downloads/personal-ai-computer.apk.sha256
 
-          cat <<EOF > site/downloads/version.json
-          {
-            "appName": "Personal AI Computer",
-            "version": "${VERSION_TAG}",
-            "buildType": "${BUILD_TYPE}",
-            "releaseDate": "${RELEASE_DATE}",
-            "apkFile": "downloads/personal-ai-computer.apk",
-            "sizeBytes": ${SIZE_BYTES},
-            "sha256": "${SHA256}",
-            "minAndroid": "Android 7.0 (API 24)",
-            "changelog": [
-              "Autonomous OpenClaw-inspired Agent Engine (Bangla & English)",
-              "Local Virtual Linux Environment (sh, PyLite Python 3, V8 JS, HTTP server)",
-              "Multi-tab Chromium WebView DOM Automation & Accessibility Virtual Hands"
-            ]
+          python3 -c '
+          import json, sys
+          data = {
+              "appName": "Personal AI Computer",
+              "version": sys.argv[1],
+              "buildType": sys.argv[2],
+              "releaseDate": sys.argv[3],
+              "apkFile": "downloads/personal-ai-computer.apk",
+              "releaseDownloadUrl": sys.argv[4],
+              "sizeBytes": int(sys.argv[5]),
+              "sha256": sys.argv[6],
+              "minAndroid": "Android 7.0 (API 24)",
+              "changelog": [
+                  "Autonomous OpenClaw-inspired Agent Engine (Bangla & English)",
+                  "Local Virtual Linux Environment (sh, PyLite Python 3, V8 JS, HTTP server)",
+                  "Multi-tab Chromium WebView DOM Automation & Accessibility Virtual Hands"
+              ]
           }
-          EOF
+          with open("site/downloads/version.json", "w") as f:
+              json.dump(data, f, indent=2)
+          ' "$VERSION_TAG" "$BUILD_TYPE" "$RELEASE_DATE" "$RELEASE_URL" "$SIZE_BYTES" "$SHA256"
 
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
-          echo "apk_path=site/downloads/personal-ai-computer.apk" >> "$GITHUB_OUTPUT"
 
       - name: Upload APK artifact to GitHub Actions
         uses: actions/upload-artifact@v4
@@ -118,15 +141,29 @@ jobs:
             site/downloads/personal-ai-computer.apk.sha256
             site/downloads/version.json
 
-      - name: Create GitHub Release for version tags
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Publish APK to GitHub Release (latest or tag)
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.package.outputs.release_tag }}
+          name: Personal AI Computer (${{ steps.package.outputs.release_tag }})
+          make_latest: true
           files: |
             site/downloads/personal-ai-computer.apk
             site/downloads/personal-ai-computer.apk.sha256
 
-      - name: Deploy APK download website to Netlify
+      - name: Sync version metadata to branch for Netlify Git auto-deploy
+        if: startsWith(github.ref, 'refs/heads/')
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f site/downloads/version.json site/downloads/personal-ai-computer.apk.sha256
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update APK release metadata"
+            git pull --rebase origin "${GITHUB_REF_NAME}" || true
+            git push
+          fi
+
+      - name: Deploy complete site with APK directly to Netlify (if token configured)
         if: env.NETLIFY_AUTH_TOKEN != '' && env.NETLIFY_SITE_ID != ''
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}

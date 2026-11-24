@@ -11,14 +11,26 @@ async function loadReleaseMetadata() {
     document.getElementById("min-android").textContent = data.minAndroid || "Android 7.0 (API 24)";
     document.getElementById("sha256").textContent = data.sha256 || "Not built yet";
 
-    if (data.sizeBytes && data.sizeBytes > 0 && data.apkFile) {
+    if (data.sizeBytes && data.sizeBytes > 0) {
       const mb = (data.sizeBytes / (1024 * 1024)).toFixed(2);
       document.getElementById("apk-size").textContent = `${mb} MB`;
 
-      // Verify APK artifact actually exists before enabling download link
-      const head = await fetch(data.apkFile, { method: "HEAD" });
-      if (head.ok) {
-        btn.href = data.apkFile;
+      let resolvedDownloadUrl = null;
+      if (data.apkFile) {
+        try {
+          const head = await fetch(data.apkFile, { method: "HEAD" });
+          if (head.ok) resolvedDownloadUrl = data.apkFile;
+        } catch (_) {
+          // Local relative APK not bundled in Git-connected deploy; fall back to GitHub Release URL
+        }
+      }
+
+      if (!resolvedDownloadUrl && data.releaseDownloadUrl && data.releaseDownloadUrl.startsWith("https://")) {
+        resolvedDownloadUrl = data.releaseDownloadUrl;
+      }
+
+      if (resolvedDownloadUrl) {
+        btn.href = resolvedDownloadUrl;
         btn.classList.remove("disabled");
         btn.removeAttribute("aria-disabled");
         statusEl.textContent = data.buildType || "Ready";
