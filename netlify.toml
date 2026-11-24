@@ -1,5 +1,5 @@
 [build]
-  command = "echo 'Publishing static Personal AI Computer APK site'"
+  command = "node site/sync-release.js"
   publish = "site"
 
 [[headers]]

@@ -2,11 +2,10 @@ name: Android Build & Netlify APK Deploy
 
 on:
   push:
-    branches: ["main", "master"]
+    branches: ["**"]
     paths-ignore:
       - "site/downloads/version.json"
       - "site/downloads/personal-ai-computer.apk.sha256"
-    tags: ["v*"]
   workflow_dispatch:
 
 jobs:
@@ -18,6 +17,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -25,8 +26,16 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Accept Android SDK licenses & configure SDK
+        run: |
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          mkdir -p "$SDK_ROOT/licenses"
+          SDKMANAGER=$(find "$SDK_ROOT/cmdline-tools" -name sdkmanager -type f 2>/dev/null | head -n 1 || true)
+          if [ -n "$SDKMANAGER" ]; then
+            yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          fi
 
       - name: Setup Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
@@ -116,6 +125,7 @@ jobs:
               "releaseDate": sys.argv[3],
               "apkFile": "downloads/personal-ai-computer.apk",
               "releaseDownloadUrl": sys.argv[4],
+              "repo": sys.argv[7],
               "sizeBytes": int(sys.argv[5]),
               "sha256": sys.argv[6],
               "minAndroid": "Android 7.0 (API 24)",
@@ -127,7 +137,7 @@ jobs:
           }
           with open("site/downloads/version.json", "w") as f:
               json.dump(data, f, indent=2)
-          ' "$VERSION_TAG" "$BUILD_TYPE" "$RELEASE_DATE" "$RELEASE_URL" "$SIZE_BYTES" "$SHA256"
+          ' "$VERSION_TAG" "$BUILD_TYPE" "$RELEASE_DATE" "$RELEASE_URL" "$SIZE_BYTES" "$SHA256" "$GITHUB_REPOSITORY"
 
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
@@ -151,18 +161,6 @@ jobs:
             site/downloads/personal-ai-computer.apk
             site/downloads/personal-ai-computer.apk.sha256
 
-      - name: Sync version metadata to branch for Netlify Git auto-deploy
-        if: startsWith(github.ref, 'refs/heads/')
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -f site/downloads/version.json site/downloads/personal-ai-computer.apk.sha256
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: update APK release metadata"
-            git pull --rebase origin "${GITHUB_REF_NAME}" || true
-            git push
-          fi
-
       - name: Deploy complete site with APK directly to Netlify (if token configured)
         if: env.NETLIFY_AUTH_TOKEN != '' && env.NETLIFY_SITE_ID != ''
         env:
@@ -173,3 +171,18 @@ jobs:
           publish-dir: "./site"
           production-deploy: true
           deploy-message: "Deploy Personal AI Computer APK build #${{ github.run_number }}"
+
+      - name: Sync version metadata to branch for Netlify Git auto-deploy
+        if: startsWith(github.ref, 'refs/heads/')
+        continue-on-error: true
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f site/downloads/version.json site/downloads/personal-ai-computer.apk.sha256
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update APK release metadata"
+            if ! git pull --rebase origin "${GITHUB_REF_NAME}"; then
+              git rebase --abort || true
+            fi
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi

@@ -13,7 +13,7 @@ import java.util.concurrent.TimeUnit
 
 class AgentWorkScheduler(private val context: Context) {
 
-    private val workManager = WorkManager.getInstance(context)
+    private val workManager: WorkManager by lazy { WorkManager.getInstance(context) }
 
     fun scheduleRule(rule: AutomationRuleEntity) {
         val data = Data.Builder()

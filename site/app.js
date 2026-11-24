@@ -4,7 +4,35 @@ async function loadReleaseMetadata() {
   try {
     const resp = await fetch("downloads/version.json", { cache: "no-store" });
     if (!resp.ok) throw new Error("Missing version.json");
-    const data = await resp.json();
+    let data = await resp.json();
+
+    // If version.json is still pending-ci-build but repo slug is known, query GitHub Releases live
+    if ((!data.sizeBytes || data.sizeBytes === 0) && data.repo) {
+      try {
+        let release = null;
+        const ghResp = await fetch(`https://api.github.com/repos/${data.repo}/releases/latest`);
+        if (ghResp.ok) {
+          release = await ghResp.json();
+        } else {
+          const listResp = await fetch(`https://api.github.com/repos/${data.repo}/releases?per_page=1`);
+          if (listResp.ok) {
+            const list = await listResp.json();
+            if (Array.isArray(list) && list.length > 0) release = list[0];
+          }
+        }
+        const apkAsset = release && (release.assets || []).find((a) => a.name && a.name.endsWith(".apk"));
+        if (apkAsset) {
+          data = {
+            ...data,
+            version: release.tag_name || "latest",
+            buildType: "github-release",
+            releaseDate: apkAsset.updated_at || release.published_at,
+            releaseDownloadUrl: apkAsset.browser_download_url,
+            sizeBytes: apkAsset.size
+          };
+        }
+      } catch (_) {}
+    }
 
     document.getElementById("version").textContent = data.version || "Pending CI";
     document.getElementById("release-date").textContent = data.releaseDate ? new Date(data.releaseDate).toLocaleString() : "—";
@@ -20,9 +48,7 @@ async function loadReleaseMetadata() {
         try {
           const head = await fetch(data.apkFile, { method: "HEAD" });
           if (head.ok) resolvedDownloadUrl = data.apkFile;
-        } catch (_) {
-          // Local relative APK not bundled in Git-connected deploy; fall back to GitHub Release URL
-        }
+        } catch (_) {}
       }
 
       if (!resolvedDownloadUrl && data.releaseDownloadUrl && data.releaseDownloadUrl.startsWith("https://")) {
@@ -37,6 +63,10 @@ async function loadReleaseMetadata() {
       } else {
         statusEl.textContent = "APK binary not yet published";
       }
+    } else {
+      statusEl.textContent = data.repo
+        ? `Waiting for GitHub Actions on ${data.repo}`
+        : "Awaiting first CI build";
     }
 
     if (Array.isArray(data.changelog) && data.changelog.length > 0) {
