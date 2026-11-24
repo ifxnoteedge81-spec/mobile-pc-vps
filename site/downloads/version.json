@@ -1,0 +1,13 @@
+{
+  "appName": "Personal AI Computer",
+  "version": "pending-ci-build",
+  "buildType": "unbuilt-template",
+  "releaseDate": "",
+  "apkFile": "",
+  "sizeBytes": 0,
+  "sha256": "Populated automatically when GitHub Actions builds the APK",
+  "minAndroid": "Android 7.0 (API 24)",
+  "changelog": [
+    "v1.0.0 — Autonomous AI Agent Engine (Gemini + OpenRouter), Local Linux Shell + PyLite Python + V8 JS, Multi-tab WebView Browser & Virtual Hands"
+  ]
+}

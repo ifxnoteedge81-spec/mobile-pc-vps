@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">AI Computer</string>
+    <string name="accessibility_service_description">Personal AI Computer Virtual Hands allows authorized UI inspection and gesture automation (tap, scroll, swipe, text input) on your screen only when explicitly triggered by you or approved agent tasks.</string>
+    <string name="accessibility_service_label">AI Computer Virtual Hands</string>
+</resources>

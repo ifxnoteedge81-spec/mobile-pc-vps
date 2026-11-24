@@ -1,0 +1,138 @@
+name: Android Build & Netlify APK Deploy
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build_and_deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+
+      - name: Run unit tests & lint
+        run: |
+          if [ -x ./gradlew ]; then
+            ./gradlew testDebugUnitTest lintDebug
+          else
+            gradle testDebugUnitTest lintDebug
+          fi
+
+      - name: Configure release signing if secrets are present
+        id: signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$STORE_PASSWORD" ] && [ -n "$KEY_PASSWORD" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > my-upload-key.jks
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build APK
+        env:
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
+            gradle assembleRelease
+          else
+            gradle assembleDebug
+          fi
+
+      - name: Verify APK, compute SHA-256 & prepare Netlify payload
+        id: package
+        run: |
+          if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
+            APK_SRC="app/build/outputs/apk/release/app-release.apk"
+            BUILD_TYPE="signed-release"
+          else
+            APK_SRC="app/build/outputs/apk/debug/app-debug.apk"
+            BUILD_TYPE="debug-unsigned-fallback"
+          fi
+
+          if [ ! -f "$APK_SRC" ]; then
+            echo "ERROR: APK not found at $APK_SRC"
+            exit 1
+          fi
+
+          mkdir -p site/downloads
+          cp "$APK_SRC" site/downloads/personal-ai-computer.apk
+          SHA256=$(sha256sum site/downloads/personal-ai-computer.apk | awk '{print $1}')
+          SIZE_BYTES=$(stat -c%s site/downloads/personal-ai-computer.apk)
+          VERSION_TAG="${GITHUB_REF_NAME:-main}-${GITHUB_RUN_NUMBER}"
+          RELEASE_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          echo "$SHA256  personal-ai-computer.apk" > site/downloads/personal-ai-computer.apk.sha256
+
+          cat <<EOF > site/downloads/version.json
+          {
+            "appName": "Personal AI Computer",
+            "version": "${VERSION_TAG}",
+            "buildType": "${BUILD_TYPE}",
+            "releaseDate": "${RELEASE_DATE}",
+            "apkFile": "downloads/personal-ai-computer.apk",
+            "sizeBytes": ${SIZE_BYTES},
+            "sha256": "${SHA256}",
+            "minAndroid": "Android 7.0 (API 24)",
+            "changelog": [
+              "Autonomous OpenClaw-inspired Agent Engine (Bangla & English)",
+              "Local Virtual Linux Environment (sh, PyLite Python 3, V8 JS, HTTP server)",
+              "Multi-tab Chromium WebView DOM Automation & Accessibility Virtual Hands"
+            ]
+          }
+          EOF
+
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+          echo "apk_path=site/downloads/personal-ai-computer.apk" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK artifact to GitHub Actions
+        uses: actions/upload-artifact@v4
+        with:
+          name: personal-ai-computer-apk
+          path: |
+            site/downloads/personal-ai-computer.apk
+            site/downloads/personal-ai-computer.apk.sha256
+            site/downloads/version.json
+
+      - name: Create GitHub Release for version tags
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            site/downloads/personal-ai-computer.apk
+            site/downloads/personal-ai-computer.apk.sha256
+
+      - name: Deploy APK download website to Netlify
+        if: env.NETLIFY_AUTH_TOKEN != '' && env.NETLIFY_SITE_ID != ''
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+        uses: nwtgck/actions-netlify@v3
+        with:
+          publish-dir: "./site"
+          production-deploy: true
+          deploy-message: "Deploy Personal AI Computer APK build #${{ github.run_number }}"
