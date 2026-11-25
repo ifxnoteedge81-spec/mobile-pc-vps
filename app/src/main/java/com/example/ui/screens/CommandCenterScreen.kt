@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -53,6 +54,7 @@ import androidx.compose.material.icons.filled.PanTool
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.TouchApp
@@ -105,7 +107,11 @@ import com.example.browser.BrowserTab
 import com.example.storage.ImportedSkillEntity
 import com.example.ui.components.GlassOsCard
 import com.example.ui.components.StatusBadge
+import com.example.ui.components.WebViewUploadChooserDialog
+import com.example.ui.components.configureAgentWebView
+import com.example.ui.components.flushWebViewCookies
 import com.example.ui.components.formatBytes
+import com.example.ui.components.resolveWorkspaceShareUri
 import com.example.ui.theme.AmberWarning
 import com.example.ui.theme.CoralAlert
 import com.example.ui.theme.EmeraldPulse
@@ -491,7 +497,29 @@ fun CommandCenterScreen(
                 }
             } else {
                 items(agentState.feed, key = { it.id }) { item ->
-                    FeedItemCard(item)
+                    FeedItemCard(
+                        item = item,
+                        onOpenPreviewUrl = { url ->
+                            browserController.openUrlInActiveOrNewTab(url)
+                            showLiveScreen = true
+                            liveScreenMode = "BROWSER"
+                        },
+                        onShareWorkspaceFile = { relPath ->
+                            val shareUri = resolveWorkspaceShareUri(context, relPath)
+                            if (shareUri != null) {
+                                val fileName = relPath.substringAfterLast('/')
+                                val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "*/*"
+                                    putExtra(Intent.EXTRA_STREAM, shareUri)
+                                    putExtra(Intent.EXTRA_SUBJECT, fileName)
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                }
+                                context.startActivity(
+                                    Intent.createChooser(sendIntent, "Share $fileName")
+                                )
+                            }
+                        }
+                    )
                 }
             }
 
@@ -872,6 +900,26 @@ private fun LiveScreenAgentPanel(
 ) {
     val activeTab = browserTabs.firstOrNull { it.id == activeTabId } ?: browserTabs.first()
     var webViewInstance by remember { mutableStateOf<WebView?>(null) }
+    var lastSyncedTabId by remember { mutableStateOf(activeTab.id) }
+    var lastSyncedSeq by remember { mutableStateOf(activeTab.navigationSeq) }
+    var pendingFileCallback by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
+    var pendingAcceptTypes by remember { mutableStateOf(arrayOf("*/*")) }
+
+    val liveUploadLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        pendingFileCallback?.onReceiveValue(if (uris.isNotEmpty()) uris.toTypedArray() else null)
+        pendingFileCallback = null
+    }
+
+    DisposableEffect(webViewInstance) {
+        onDispose {
+            flushWebViewCookies()
+            webViewInstance?.let { browserController.detachWebView(it) }
+            pendingFileCallback?.onReceiveValue(null)
+            pendingFileCallback = null
+        }
+    }
 
     GlassOsCard(
         modifier = Modifier
@@ -981,15 +1029,13 @@ private fun LiveScreenAgentPanel(
                 AndroidView(
                     factory = { ctx ->
                         WebView(ctx).apply {
-                            settings.javaScriptEnabled = true
-                            settings.domStorageEnabled = true
-                            settings.builtInZoomControls = true
-                            settings.displayZoomControls = false
+                            configureAgentWebView(this)
                             webViewClient = object : WebViewClient() {
                                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                                     if (url != null) browserController.updateActiveTabMeta(url = url, isLoading = true)
                                 }
                                 override fun onPageFinished(view: WebView?, url: String?) {
+                                    flushWebViewCookies()
                                     browserController.updateActiveTabMeta(title = view?.title, url = url, isLoading = false, progress = 100)
                                 }
                             }
@@ -997,15 +1043,38 @@ private fun LiveScreenAgentPanel(
                                 override fun onProgressChanged(view: WebView?, newProgress: Int) {
                                     browserController.updateActiveTabMeta(progress = newProgress)
                                 }
+                                override fun onShowFileChooser(
+                                    webView: WebView?,
+                                    filePathCallback: ValueCallback<Array<Uri>>?,
+                                    fileChooserParams: FileChooserParams?
+                                ): Boolean {
+                                    pendingFileCallback?.onReceiveValue(null)
+                                    pendingFileCallback = filePathCallback
+                                    val accepts = fileChooserParams?.acceptTypes
+                                        ?.map { it.trim() }
+                                        ?.filter { it.isNotBlank() && it.contains("/") }
+                                        ?.toTypedArray()
+                                    pendingAcceptTypes = if (accepts != null && accepts.isNotEmpty()) accepts else arrayOf("*/*")
+                                    return true
+                                }
                             }
                             browserController.attachWebView(this)
                             webViewInstance = this
+                            lastSyncedTabId = activeTab.id
+                            lastSyncedSeq = activeTab.navigationSeq
                             loadUrl(activeTab.url)
                         }
                     },
                     update = { wv ->
                         browserController.attachWebView(wv)
                         webViewInstance = wv
+                        if (lastSyncedTabId != activeTab.id || lastSyncedSeq != activeTab.navigationSeq) {
+                            lastSyncedTabId = activeTab.id
+                            lastSyncedSeq = activeTab.navigationSeq
+                            if (wv.url != activeTab.url) {
+                                wv.loadUrl(activeTab.url)
+                            }
+                        }
                     },
                     modifier = Modifier.fillMaxSize()
                 )
@@ -1082,10 +1151,23 @@ private fun LiveScreenAgentPanel(
             }
         }
     }
+
+    WebViewUploadChooserDialog(
+        pendingCallback = pendingFileCallback,
+        onPickFromPhone = { liveUploadLauncher.launch(pendingAcceptTypes) },
+        onDeliverWorkspaceUris = { uris ->
+            pendingFileCallback?.onReceiveValue(uris)
+            pendingFileCallback = null
+        }
+    )
 }
 
 @Composable
-private fun FeedItemCard(item: CommandFeedItem) {
+private fun FeedItemCard(
+    item: CommandFeedItem,
+    onOpenPreviewUrl: (String) -> Unit = {},
+    onShareWorkspaceFile: (String) -> Unit = {}
+) {
     val (badgeLabel, badgeColor, icon) = when (item.kind) {
         FeedEntryKind.USER_COMMAND -> Triple("User Command", NeuralCyan, Icons.Filled.CheckCircle)
         FeedEntryKind.AI_REASONING -> Triple("AI Reasoning / Report", VioletAccent, Icons.Filled.CheckCircle)
@@ -1118,5 +1200,40 @@ private fun FeedItemCard(item: CommandFeedItem) {
             },
             color = MaterialTheme.colorScheme.onSurface
         )
+        if (item.actionUrl != null || item.shareRelativePath != null) {
+            Spacer(Modifier.height(8.dp))
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                item.actionUrl?.let { url ->
+                    item(key = "preview_url") {
+                        AssistChip(
+                            onClick = { onOpenPreviewUrl(url) },
+                            leadingIcon = { Icon(Icons.Filled.Monitor, contentDescription = null, modifier = Modifier.size(16.dp), tint = NeuralCyan) },
+                            label = { Text("Open Blueprint Viewer") },
+                            modifier = Modifier.testTag("cad_preview_button")
+                        )
+                    }
+                }
+                item.shareRelativePath?.let { rel ->
+                    item(key = "share_primary") {
+                        AssistChip(
+                            onClick = { onShareWorkspaceFile(rel) },
+                            leadingIcon = { Icon(Icons.Filled.Share, contentDescription = null, modifier = Modifier.size(16.dp), tint = EmeraldPulse) },
+                            label = { Text("Share ${rel.substringAfterLast('.').uppercase()}") },
+                            modifier = Modifier.testTag("cad_share_primary_button")
+                        )
+                    }
+                }
+                item.shareSecondaryPath?.let { rel2 ->
+                    item(key = "share_secondary") {
+                        AssistChip(
+                            onClick = { onShareWorkspaceFile(rel2) },
+                            leadingIcon = { Icon(Icons.Filled.Share, contentDescription = null, modifier = Modifier.size(16.dp), tint = VioletAccent) },
+                            label = { Text("Share ${rel2.substringAfterLast('.').uppercase()}") },
+                            modifier = Modifier.testTag("cad_share_secondary_button")
+                        )
+                    }
+                }
+            }
+        }
     }
 }

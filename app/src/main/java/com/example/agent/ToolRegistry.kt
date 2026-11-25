@@ -34,7 +34,10 @@ data class ToolExecutionOutcome(
     val success: Boolean,
     val output: String,
     val verified: Boolean = true,
-    val interventionRequest: HumanInterventionRequest? = null
+    val interventionRequest: HumanInterventionRequest? = null,
+    val actionUrl: String? = null,
+    val shareRelativePath: String? = null,
+    val shareSecondaryPath: String? = null
 )
 
 data class PendingPermissionRequest(
@@ -96,7 +99,7 @@ class ToolRegistry(
         ),
         ToolDeclaration(
             name = "file_read",
-            description = "Read a text file from virtual_env (including uploads/).",
+            description = "Read and extract readable text from any file in virtual_env (supports .pdf, .docx, .txt, .md, .csv, .json, and source files, including uploads/).",
             parametersSchema = schema(
                 props = mapOf("path" to prop("string", "Relative file path")),
                 required = listOf("path")
@@ -123,12 +126,14 @@ class ToolRegistry(
         ),
         ToolDeclaration(
             name = "http_request",
-            description = "Fast direct HTTPS GET/POST/PUT request for APIs, GitHub raw files, JSON, or web pages.",
+            description = "Fast direct HTTPS GET/POST/PUT/PATCH/DELETE request for APIs, GitHub raw files, JSON, or web pages with optional custom headers.",
             parametersSchema = schema(
                 props = mapOf(
                     "url" to prop("string", "Full https:// URL"),
-                    "method" to prop("string", "GET, POST, PUT, or DELETE"),
-                    "body" to prop("string", "Optional JSON/text request body")
+                    "method" to prop("string", "GET, POST, PUT, PATCH, DELETE, or HEAD"),
+                    "body" to prop("string", "Optional JSON/text request body"),
+                    "headers" to prop("string", "Optional JSON object string of custom headers, e.g. '{\"Authorization\":\"Bearer ...\",\"Accept\":\"application/json\"}'"),
+                    "content_type" to prop("string", "Optional Content-Type header, default application/json")
                 ),
                 required = listOf("url")
             )
@@ -398,6 +403,101 @@ class ToolRegistry(
         )
     )
 
+    fun getDeclarationsForPrompt(
+        userPrompt: String,
+        hasAttachments: Boolean = false,
+        hasImportedSkills: Boolean = false
+    ): List<ToolDeclaration> {
+        val all = getDeclarations()
+        val lower = userPrompt.lowercase()
+
+        // If user gives an open-ended "do anything / super autonomous" request, expose every tool
+        if (lower.contains("super autonomous") || lower.contains("সবকিছু") || lower.contains("all tools")) {
+            return all
+        }
+
+        val coreNames = linkedSetOf(
+            "file_list", "file_read", "file_write", "file_delete", "workspace_grep",
+            "http_request", "python_exec", "shell_exec",
+            "memory_read", "memory_save", "system_hardware_status"
+        )
+
+        var matchedDomainCount = 0
+
+        val wantsWeb = listOf(
+            "browser", "web", "http", "url", "search", "google", "site", "portal",
+            "job", "apply", "remotive", "linkedin", "bdjobs", "html", "download", "server",
+            "ব্রাউজার", "ওয়েব", "সার্চ", "চাকরি", "জব", "এপ্লাই", "ডাউনলোড", "লিংক", "ওয়েবসাইট"
+        ).any { lower.contains(it) }
+        if (wantsWeb) {
+            matchedDomainCount++
+            coreNames.addAll(
+                listOf(
+                    "browser_open_and_read", "browser_click", "browser_fill",
+                    "browser_scroll", "browser_eval_js", "browser_download",
+                    "request_human_intervention", "local_server_control"
+                )
+            )
+        }
+
+        val wantsVirtualHands = listOf(
+            "virtual hand", "app", "screen", "tap", "swipe", "scroll", "otp", "captcha",
+            "play store", "install", "launch", "share", "email", "dial", "call", "clipboard",
+            "অ্যাপ", "স্ক্রিন", "ইনস্টল", "শেয়ার", "ইমেইল", "ওটিপি", "ক্যাপচা", "কল"
+        ).any { lower.contains(it) }
+        if (wantsVirtualHands) {
+            matchedDomainCount++
+            coreNames.addAll(
+                listOf(
+                    "app_list", "app_launch", "app_install_store",
+                    "device_screen_inspect", "device_virtual_hand",
+                    "device_clipboard", "device_intent_action", "request_human_intervention"
+                )
+            )
+        }
+
+        val wantsCad = listOf(
+            "cad", "autocad", "dxf", "stl", "svg", "blueprint", "floor plan", "drawing",
+            "3d", "bracket", "gear", "architect", "mechanical", "civil", "engineering design",
+            "ড্রয়িং", "ফ্লোর প্ল্যান", "ব্লুপ্রিন্ট", "নকশা", "ডিজাইন"
+        ).any { lower.contains(it) }
+        if (wantsCad) {
+            matchedDomainCount++
+            coreNames.addAll(
+                listOf(
+                    "cad_generate_drawing", "local_server_control",
+                    "browser_open_and_read", "device_intent_action"
+                )
+            )
+        }
+
+        val wantsJs = listOf("javascript", "typescript", "node", "js", "ts", "v8", "react").any { lower.contains(it) }
+        if (wantsJs) {
+            matchedDomainCount++
+            coreNames.add("js_exec")
+        }
+
+        val wantsSkills = hasImportedSkills || hasAttachments || listOf(
+            "skill", "import", "anthropic", "claude", "openclaw", "mcp", "github", "স্কিল", "ইমপোর্ট"
+        ).any { lower.contains(it) }
+        if (wantsSkills) {
+            if (!hasImportedSkills) matchedDomainCount++
+            coreNames.addAll(listOf("skill_import_auto", "skill_list", "skill_load", "skill_delete"))
+        }
+
+        val wantsScheduleOrMedia = listOf(
+            "schedule", "daily", "weekly", "monthly", "cron", "remind", "youtube", "video",
+            "শিডিউল", "প্রতিদিন", "ইউটিউব", "ভিডিও"
+        ).any { lower.contains(it) }
+        if (wantsScheduleOrMedia) {
+            matchedDomainCount++
+            coreNames.addAll(listOf("schedule_automation", "youtube_prepare_package"))
+        }
+
+        // If prompt is ambiguous or doesn't explicitly narrow to 1-2 domains, keep full toolset
+        return if (matchedDomainCount == 0) all else all.filter { it.name in coreNames }
+    }
+
     fun evaluatePermission(
         toolName: String,
         args: JSONObject,
@@ -546,7 +646,9 @@ class ToolRegistry(
                 val url = args.optString("url")
                 val method = args.optString("method", "GET")
                 val body = args.optString("body", "")
-                val res = browser.fastHttpRequest(method, url, body)
+                val contentType = args.optString("content_type", "application/json")
+                val parsedHeaders = parseHeadersArg(args.opt("headers"))
+                val res = browser.fastHttpRequest(method, url, body, contentType, parsedHeaders)
                 ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "HTTP failed" }, verified = true)
             }
             "browser_open_and_read" -> {
@@ -854,17 +956,25 @@ class ToolRegistry(
                 )
                 res.fold(
                     onSuccess = { cad ->
-                        val st = if (!webServer.state.value.running) webServer.start(8080) else webServer.state.value
-                        val viewerUrl = "${st.url}/cad/${cad.slug}/${cad.slug}_viewer.html"
+                        if (!webServer.state.value.running) webServer.start(8080)
+                        val viewerUrl = webServer.urlFor("cad/${cad.slug}/${cad.slug}_viewer.html")
                         val summary = buildString {
                             append("Generated Real CAD Package '${cad.title}' (${cad.entityCount} entities, ${"%.1f".format(cad.width)} x ${"%.1f".format(cad.height)} ${cad.units})\n")
                             append("• AutoCAD DXF: ${cad.dxfPath}\n")
                             append("• Dimensioned SVG Blueprint: ${cad.svgPath}\n")
                             append("• Interactive CAD Viewer: ${cad.viewerHtmlPath} (Live URL: $viewerUrl)\n")
                             cad.stlPath?.let { append("• 3D CAD Mesh STL: $it\n") }
-                            append("Tip: You can open $viewerUrl in browser_open_and_read to preview visually on Live Screen, or share ${cad.dxfPath} to AutoCAD/DWG viewer via device_intent_action.")
+                            append("Tip: Open $viewerUrl in browser_open_and_read to preview visually, or tap Share/Open Blueprint below.")
                         }
-                        ToolExecutionOutcome(toolName, true, summary, verified = true)
+                        ToolExecutionOutcome(
+                            toolName = toolName,
+                            success = true,
+                            output = summary,
+                            verified = true,
+                            actionUrl = viewerUrl,
+                            shareRelativePath = cad.dxfPath,
+                            shareSecondaryPath = cad.stlPath
+                        )
                     },
                     onFailure = { err ->
                         ToolExecutionOutcome(toolName, false, "CAD generation error: ${err.message}", verified = true)
@@ -951,6 +1061,20 @@ class ToolRegistry(
             .put("type", "object")
             .put("properties", properties)
             .put("required", reqArr)
+    }
+
+    private fun parseHeadersArg(raw: Any?): Map<String, String> {
+        val obj = when (raw) {
+            is JSONObject -> raw
+            is String -> raw.trim().takeIf { it.startsWith("{") }?.let { runCatching { JSONObject(it) }.getOrNull() }
+            else -> null
+        } ?: return emptyMap()
+        val map = linkedMapOf<String, String>()
+        obj.keys().forEach { key ->
+            val v = obj.opt(key)?.toString()
+            if (!key.isNullOrBlank() && v != null) map[key] = v
+        }
+        return map
     }
 
     private fun prop(type: String, description: String): JSONObject =

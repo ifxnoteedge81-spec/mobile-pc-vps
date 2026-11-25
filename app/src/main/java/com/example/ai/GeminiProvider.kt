@@ -1,6 +1,7 @@
 package com.example.ai
 
 import com.example.security.NetworkAuditLogger
+import com.example.security.SecureKeyStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -18,9 +19,14 @@ class GeminiProvider(
     private val auditLogger: NetworkAuditLogger
 ) {
     private val client = OkHttpClient.Builder()
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(45, TimeUnit.SECONDS)
-        .writeTimeout(20, TimeUnit.SECONDS)
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(28, TimeUnit.SECONDS)
+        .writeTimeout(15, TimeUnit.SECONDS)
+        .build()
+
+    private val discoveryClient = OkHttpClient.Builder()
+        .connectTimeout(6, TimeUnit.SECONDS)
+        .readTimeout(8, TimeUnit.SECONDS)
         .build()
 
     @Volatile
@@ -30,17 +36,18 @@ class GeminiProvider(
 
     suspend fun fetchAvailableModels(apiKey: String, forceRefresh: Boolean = false): Result<List<GeminiModelInfo>> =
         withContext(Dispatchers.IO) {
-            val freshCache = System.currentTimeMillis() - cachedModelsFetchedAt < 10 * 60_000L
+            val cleanKey = SecureKeyStore.sanitizeSecret(apiKey)
+            val freshCache = System.currentTimeMillis() - cachedModelsFetchedAt < 30 * 60_000L
             if (!forceRefresh && freshCache && cachedDiscoveredModels.isNotEmpty()) {
                 return@withContext Result.success(cachedDiscoveredModels)
             }
             runCatching {
                 val request = Request.Builder()
                     .url("https://generativelanguage.googleapis.com/v1beta/models?pageSize=100")
-                    .addHeader("x-goog-api-key", apiKey)
+                    .addHeader("x-goog-api-key", cleanKey)
                     .get()
                     .build()
-                client.newCall(request).execute().use { resp ->
+                discoveryClient.newCall(request).execute().use { resp ->
                     val raw = resp.body?.string().orEmpty()
                     check(resp.isSuccessful) { "Gemini models HTTP ${resp.code}: ${extractError(raw)}" }
                     auditLogger.log("generativelanguage.googleapis.com", "Gemini Model Discovery", "200 OK", raw.length.toLong())
@@ -92,7 +99,8 @@ class GeminiProvider(
         }
         val discovered = fetchAvailableModels(apiKey).getOrElse { emptyList() }
         if (discovered.isEmpty()) {
-            return emptyList()
+            // Instant resilient fallback so discovery lag/errors never stall replies
+            return listOf("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash")
         }
         return discovered
             .sortedByDescending { scoreGeminiModel(it.id, complexity, preferFastOnSimple) }
@@ -107,7 +115,7 @@ class GeminiProvider(
         if (verMatch != null) {
             val major = verMatch.groupValues[1].toIntOrNull() ?: 1
             val minor = verMatch.groupValues[2].toIntOrNull() ?: 0
-            score += major * 1000 + minor * 100
+            score += (major * 200 + minor * 20)
         }
         val isLite = lower.contains("lite")
         val isFlash = lower.contains("flash")
@@ -115,23 +123,27 @@ class GeminiProvider(
         val isLatestAlias = lower.endsWith("-latest")
         val isExperimental = lower.contains("exp") || lower.contains("preview")
 
-        // Prioritize fast Flash models for agentic loops so answers don't stall on slow Pro thinking models
+        // Strongly prioritize stable low-latency Flash models so replies never take 2-3 minutes
         score += when (complexity) {
             TaskComplexity.REASONING -> when {
-                !preferFast && isPro -> 600
-                isFlash && !isLite -> 560
-                isPro -> 420
+                !preferFast && isPro && !isExperimental -> 850
+                isFlash && !isLite && !isExperimental -> 820
+                isFlash && !isLite -> 700
+                isPro -> 500
                 else -> 250
             }
             TaskComplexity.SIMPLE, TaskComplexity.CODING, TaskComplexity.MULTISTEP_AGENT -> when {
-                isFlash && !isLite -> 650
-                isFlash && isLite -> 480
-                isPro -> 340
-                else -> 220
+                lower == "gemini-2.5-flash" -> 1400
+                lower == "gemini-2.5-flash-lite" && complexity == TaskComplexity.SIMPLE -> 1450
+                isFlash && !isLite && !isExperimental -> 1150
+                isFlash && isLite && !isExperimental -> 980
+                isFlash && !isLite -> 750
+                isPro && !isExperimental -> 480
+                else -> 240
             }
         }
-        if (isLatestAlias) score += 80
-        if (!isExperimental) score += 120
+        if (isLatestAlias) score -= 40
+        if (!isExperimental) score += 350 else score -= 250
         if (lower.contains("deprecated")) score -= 3000
         return score
     }
@@ -143,9 +155,14 @@ class GeminiProvider(
         messages: List<AiMessage>,
         tools: List<ToolDeclaration>,
         stream: Boolean,
+        fastMode: Boolean = false,
         onStreamChunk: (String) -> Unit = {}
     ): Result<AiCompletionResult> = withContext(Dispatchers.IO) {
-        val bodyJson = buildRequestBody(systemPrompt, messages, tools)
+        val cleanKey = SecureKeyStore.sanitizeSecret(apiKey)
+        if (cleanKey.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Gemini API key is empty or invalid."))
+        }
+        val bodyJson = buildRequestBody(model, systemPrompt, messages, tools, fastMode)
         val endpoint = if (stream && tools.isEmpty()) {
             "https://generativelanguage.googleapis.com/v1beta/models/$model:streamGenerateContent?alt=sse"
         } else {
@@ -157,7 +174,7 @@ class GeminiProvider(
             try {
                 val request = Request.Builder()
                     .url(endpoint)
-                    .addHeader("x-goog-api-key", apiKey)
+                    .addHeader("x-goog-api-key", cleanKey)
                     .addHeader("Content-Type", "application/json")
                     .post(bodyJson.toString().toRequestBody("application/json".toMediaType()))
                     .build()
@@ -203,9 +220,11 @@ class GeminiProvider(
     }
 
     private fun buildRequestBody(
+        model: String,
         systemPrompt: String,
         messages: List<AiMessage>,
-        tools: List<ToolDeclaration>
+        tools: List<ToolDeclaration>,
+        fastMode: Boolean
     ): JSONObject {
         val contents = JSONArray()
         var idx = 0
@@ -214,6 +233,16 @@ class GeminiProvider(
             when (msg.role) {
                 "user" -> {
                     val userParts = JSONArray().put(JSONObject().put("text", msg.content))
+                    msg.imageAttachments.forEach { img ->
+                        userParts.put(
+                            JSONObject().put(
+                                "inlineData",
+                                JSONObject()
+                                    .put("mimeType", img.mimeType)
+                                    .put("data", img.base64Data)
+                            )
+                        )
+                    }
                     contents.put(JSONObject().put("role", "user").put("parts", userParts))
                     idx++
                 }
@@ -272,6 +301,17 @@ class GeminiProvider(
                 "systemInstruction",
                 JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemPrompt)))
             )
+        }
+        val lowerModel = model.lowercase()
+        val genConfig = JSONObject()
+        if (lowerModel.contains("2.5-flash")) {
+            // 0 thinking budget on quick greetings/fast mode; lean 512 on tool turns so responses arrive in ~2-5s
+            genConfig.put("thinkingConfig", JSONObject().put("thinkingBudget", if (fastMode) 0 else 512))
+        } else if (lowerModel.contains("gemini-3") && lowerModel.contains("flash")) {
+            genConfig.put("thinkingConfig", JSONObject().put("thinkingLevel", if (fastMode) "minimal" else "low"))
+        }
+        if (genConfig.length() > 0) {
+            root.put("generationConfig", genConfig)
         }
         if (tools.isNotEmpty()) {
             val decls = JSONArray()

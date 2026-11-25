@@ -34,7 +34,7 @@ class LocalLinuxEnvironment(
     private val jsEngine: LocalJsEngine,
     private val webServer: LocalWebServer
 ) {
-    private var currentDir: File = workspace.workspaceDir
+    private var currentDir: File = workspace.rootDir
     private val envVars = mutableMapOf(
         "HOME" to workspace.homeDir.absolutePath,
         "TMPDIR" to workspace.tmpDir.absolutePath,
@@ -53,7 +53,7 @@ class LocalLinuxEnvironment(
     )
     val terminalLines: StateFlow<List<TerminalLine>> = _terminalLines.asStateFlow()
 
-    private val _currentRelativeDir = MutableStateFlow("workspace")
+    private val _currentRelativeDir = MutableStateFlow(".")
     val currentRelativeDir: StateFlow<String> = _currentRelativeDir.asStateFlow()
 
     suspend fun runInteractiveCommand(rawCommand: String, confirmedLevel2: Boolean = false): ShellExecutionResult {
@@ -159,10 +159,10 @@ class LocalLinuxEnvironment(
                 cmd.startsWith("python3 ") || cmd.startsWith("python ") -> {
                     val arg = cmd.substringAfter(" ").trim()
                     val code = if (arg.startsWith("-c ")) {
-                        arg.removePrefix("-c ").trim().removeSurrounding("\"").removeSurrounding("'")
+                        stripOuterQuotes(arg.removePrefix("-c ").trim())
                     } else {
-                        val file = workspace.resolveSafe(arg, currentDir)
-                        if (!file.exists() || !file.isFile) {
+                        val file = resolveWithWorkspaceFallback(arg)
+                        if (file == null || !file.exists() || !file.isFile) {
                             return@withContext ShellExecutionResult(2, "", "python3: can't open file '$arg'", currentRelativePath())
                         }
                         file.readText()
@@ -179,10 +179,10 @@ class LocalLinuxEnvironment(
                     val arg = cmd.substringAfter(" ").trim()
                     val isTs = arg.endsWith(".ts")
                     val code = if (arg.startsWith("-e ")) {
-                        arg.removePrefix("-e ").trim().removeSurrounding("\"").removeSurrounding("'")
+                        stripOuterQuotes(arg.removePrefix("-e ").trim())
                     } else {
-                        val file = workspace.resolveSafe(arg, currentDir)
-                        if (!file.exists() || !file.isFile) {
+                        val file = resolveWithWorkspaceFallback(arg)
+                        if (file == null || !file.exists() || !file.isFile) {
                             return@withContext ShellExecutionResult(2, "", "node: module not found '$arg'", currentRelativePath())
                         }
                         file.readText()
@@ -237,6 +237,19 @@ class LocalLinuxEnvironment(
         _terminalLines.update { current ->
             (current + TerminalLine(text = text, isCommand = isCommand, isError = isError)).takeLast(300)
         }
+    }
+
+    private fun stripOuterQuotes(s: String): String {
+        val t = s.trim()
+        return if (t.length >= 2 && ((t.startsWith("\"") && t.endsWith("\"")) || (t.startsWith("'") && t.endsWith("'")))) {
+            t.substring(1, t.length - 1)
+        } else t
+    }
+
+    private fun resolveWithWorkspaceFallback(arg: String): File? {
+        val primary = runCatching { workspace.resolveSafe(arg, currentDir) }.getOrNull()
+        if (primary != null && primary.exists()) return primary
+        return runCatching { workspace.resolveSafe(arg, workspace.rootDir) }.getOrNull()
     }
 
     private fun currentRelativePath(): String {

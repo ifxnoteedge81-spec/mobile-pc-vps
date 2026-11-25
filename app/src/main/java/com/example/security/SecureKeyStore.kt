@@ -19,18 +19,19 @@ class SecureKeyStore(context: Context) {
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     fun saveSecret(slot: SecretSlot, plainText: String) {
-        val trimmed = plainText.trim()
-        if (trimmed.isEmpty()) {
+        val cleaned = sanitizeSecret(plainText)
+        if (cleaned.isEmpty()) {
             deleteSecret(slot)
             return
         }
-        val encrypted = encrypt(trimmed)
+        val encrypted = encrypt(cleaned)
         prefs.edit().putString(slot.prefKey, encrypted).commit()
     }
 
     fun getSecret(slot: SecretSlot): String? {
         val stored = prefs.getString(slot.prefKey, null) ?: return null
-        return runCatching { decrypt(stored) }.getOrNull()
+        val decrypted = runCatching { decrypt(stored) }.getOrNull() ?: return null
+        return sanitizeSecret(decrypted).takeIf { it.isNotEmpty() }
     }
 
     fun hasSecret(slot: SecretSlot): Boolean = !getSecret(slot).isNullOrBlank()
@@ -121,5 +122,23 @@ class SecureKeyStore(context: Context) {
             SecretSlot.GEMINI_API_KEY_4,
             SecretSlot.GEMINI_API_KEY_5
         )
+
+        /**
+         * Strips zero-width, directional (e.g. U+200E), BOM, control characters, and whitespace
+         * so HTTP headers never fail with OkHttp "Unexpected char 0x200e in Authorization value".
+         */
+        fun sanitizeSecret(raw: String): String {
+            val asciiWithSpaces = buildString(raw.length) {
+                for (ch in raw) {
+                    if (ch == ' ' || ch.code in 0x21..0x7E) append(ch)
+                }
+            }.trim()
+            val withoutBearer = if (asciiWithSpaces.startsWith("Bearer ", ignoreCase = true)) {
+                asciiWithSpaces.substring(7).trim()
+            } else {
+                asciiWithSpaces
+            }
+            return withoutBearer.filter { it.code in 0x21..0x7E }
+        }
     }
 }

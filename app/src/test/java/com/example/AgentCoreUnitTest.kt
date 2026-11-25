@@ -201,4 +201,146 @@ class AgentCoreUnitTest {
         assertTrue(stlText.startsWith("solid custom_flange_3d"))
         assertTrue(stlText.contains("endsolid custom_flange_3d"))
     }
+
+    @Test
+    fun securitySanitize_stripsInvisibleDirectionalCharsAndBearer() {
+        val dirty = "\u200E\uFEFF  Bearer sk-or-v1-abc123\u200B\n  "
+        val clean = com.example.security.SecureKeyStore.sanitizeSecret(dirty)
+        assertEquals("sk-or-v1-abc123", clean)
+    }
+
+    @Test
+    fun pdfExtractorAndPyLite_readCompressedPdfWithOpenAndExceptAsE() {
+        val workspace = VirtualWorkspaceManager(tempFolder.newFolder("pdf_py_ws"))
+        // Build a genuine compressed FlateDecode PDF byte stream
+        val contentOp = "BT\n/F1 12 Tf\n72 720 Td\n(Curriculum Vitae - Rableu Mallik) Tj\nT*\n(Senior Android & AI Engineer) Tj\nET"
+        val deflater = java.util.zip.Deflater()
+        deflater.setInput(contentOp.toByteArray(Charsets.ISO_8859_1))
+        deflater.finish()
+        val deflated = java.io.ByteArrayOutputStream().also { bos ->
+            val buf = ByteArray(256)
+            while (!deflater.finished()) {
+                val n = deflater.deflate(buf)
+                bos.write(buf, 0, n)
+            }
+            deflater.end()
+        }.toByteArray()
+
+        val pdfOut = java.io.ByteArrayOutputStream()
+        pdfOut.write("%PDF-1.4\n1 0 obj << /Length ${deflated.size} /Filter /FlateDecode >>\nstream\n".toByteArray(Charsets.ISO_8859_1))
+        pdfOut.write(deflated)
+        pdfOut.write("\nendstream\nendobj\n%%EOF".toByteArray(Charsets.ISO_8859_1))
+
+        val savedPdf = workspace.saveUploadedFile("cv_test.pdf", pdfOut.toByteArray()).getOrThrow()
+        val relPdf = workspace.relativePathOf(savedPdf)
+
+        val readViaWorkspace = workspace.readTextFile(relPdf).getOrThrow()
+        assertTrue("Expected CV name in extracted PDF text, got: $readViaWorkspace", readViaWorkspace.contains("Rableu Mallik"))
+        assertTrue(readViaWorkspace.contains("Senior Android"))
+
+        // Verify PyLite handles `with open(..., "rb") as f:`, `except Exception as e:`, and `os.path.exists`
+        val python = LocalPythonEngine(workspace)
+        val pyRes = python.executeScript(
+            """
+            import os
+            try:
+                with open("$relPdf", "rb") as f:
+                    txt = f.read()
+                print("EXISTS=", os.path.exists("$relPdf"))
+                print("LEN=", len(txt))
+                print("FOUND=", "Rableu Mallik" in txt)
+                x = '"'
+                print("QUOTE=", x)
+                raise_err = undefined_var_trigger
+            except Exception as e:
+                print("CAUGHT=", e)
+            """.trimIndent()
+        )
+        assertTrue("PyLite script failed: ${pyRes.stderr}", pyRes.success)
+        assertTrue(pyRes.stdout.contains("EXISTS= True"))
+        assertTrue(pyRes.stdout.contains("FOUND= True"))
+        assertTrue(pyRes.stdout.contains("CAUGHT="))
+    }
+
+    @Test
+    fun pyLiteUpgrades_supportBreakContinueClassListCompCsvAndBuiltins() {
+        val workspace = VirtualWorkspaceManager(tempFolder.newFolder("py_up_ws"))
+        workspace.writeTextFile("workspace/jobs.csv", "role,salary\nAndroid Dev,120000\n\"ML, AI Engineer\",150000\n").getOrThrow()
+        val python = LocalPythonEngine(workspace)
+
+        val script = """
+            import csv
+
+            class Candidate:
+                def __init__(self, name, exp):
+                    self.name = name
+                    self.exp = exp
+
+                def summary(self):
+                    return f"{self.name}:{self.exp}"
+
+            c = Candidate("Rableu", 5)
+            c.exp += 1
+            print("CAND=", c.summary())
+
+            nums = [1, 2, 3, 4, 5, 6]
+            picked = []
+            for n in nums:
+                if n == 2:
+                    continue
+                if n == 5:
+                    break
+                picked.append(n)
+            print("LOOP=", picked)
+
+            evens_sq = [x * x for x in nums if x % 2 == 0]
+            print("COMP=", evens_sq)
+
+            with open("workspace/jobs.csv", "r") as f:
+                rows = csv.DictReader(f)
+            print("CSV_ROLE1=", rows[1]["role"])
+            print("ZIP=", zip([1, 2], ["a", "b"]))
+            print("ANY_ALL=", any([False, True]), all([True, True]))
+        """.trimIndent()
+
+        val res = python.executeScript(script)
+        assertTrue("PyLite upgrade test failed: ${res.stderr}", res.success)
+        assertTrue("Got: ${res.stdout}", res.stdout.contains("CAND= Rableu:6"))
+        assertTrue("Got: ${res.stdout}", res.stdout.contains("LOOP= [1, 3, 4]"))
+        assertTrue("Got: ${res.stdout}", res.stdout.contains("COMP= [4, 16, 36]"))
+        assertTrue("Got: ${res.stdout}", res.stdout.contains("CSV_ROLE1= ML, AI Engineer"))
+        assertTrue("Got: ${res.stdout}", res.stdout.contains("ZIP= [[1, a], [2, b]]"))
+        assertTrue("Got: ${res.stdout}", res.stdout.contains("ANY_ALL= True True"))
+    }
+
+    @Test
+    fun webServer_normalizesUrlsAndSupportsCadAndDocumentMimeTypes() {
+        val workspace = VirtualWorkspaceManager(tempFolder.newFolder("web_ws"))
+        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO)
+        val server = com.example.runtime.LocalWebServer(workspace, scope)
+
+        assertEquals("http://127.0.0.1:8080/cad/house/house_viewer.html", server.urlFor("/cad/house/house_viewer.html"))
+        assertEquals("image/svg+xml", com.example.runtime.LocalWebServer.mimeTypeForExtension("svg"))
+        assertEquals("application/dxf", com.example.runtime.LocalWebServer.mimeTypeForExtension("dxf"))
+        assertEquals("model/stl", com.example.runtime.LocalWebServer.mimeTypeForExtension("stl"))
+        assertEquals("application/pdf", com.example.runtime.LocalWebServer.mimeTypeForExtension("pdf"))
+        assertEquals("image/webp", com.example.runtime.LocalWebServer.mimeTypeForExtension("webp"))
+        assertEquals("application/wasm", com.example.runtime.LocalWebServer.mimeTypeForExtension("wasm"))
+    }
+
+    @Test
+    fun aiMessageAndAttachment_preserveMultimodalImages() {
+        val img = com.example.ai.AiImageAttachment(
+            displayName = "scanned_cv.pdf (Page 1)",
+            mimeType = "image/jpeg",
+            base64Data = "AQID"
+        )
+        val msg = com.example.ai.AiMessage(
+            role = "user",
+            content = "Read this scanned CV",
+            imageAttachments = listOf(img)
+        )
+        assertEquals(1, msg.imageAttachments.size)
+        assertEquals("image/jpeg", msg.imageAttachments.first().mimeType)
+    }
 }

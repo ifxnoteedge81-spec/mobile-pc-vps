@@ -329,19 +329,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     require(bytes.size <= 10 * 1024 * 1024) { "$name exceeds 10MB upload limit" }
                     val savedFile = container.workspaceManager.saveUploadedFile(name, bytes).getOrThrow()
                     val relPath = container.workspaceManager.relativePathOf(savedFile)
-                    val isTextLike = mime.startsWith("text/") ||
-                        name.substringAfterLast('.', "").lowercase() in setOf(
-                            "txt", "md", "csv", "json", "py", "js", "ts", "html", "css", "xml", "yaml", "yml", "sh", "log", "kt", "java"
-                        )
-                    val excerpt = if (isTextLike && bytes.isNotEmpty()) {
-                        bytes.decodeToString().take(3000)
+                    val isImg = com.example.runtime.MediaVisionHelper.isImageAttachment(name, mime)
+                    val excerpt = if (!isImg && bytes.isNotEmpty() && (
+                            com.example.runtime.DocumentTextExtractor.isStructuredDocument(name, mime) ||
+                                com.example.runtime.DocumentTextExtractor.isPlainTextDocument(name, mime)
+                            )
+                    ) {
+                        com.example.runtime.DocumentTextExtractor.extractText(
+                            fileName = name,
+                            bytes = bytes,
+                            mimeType = mime,
+                            maxChars = 6000
+                        ).takeIf { it.isNotBlank() }
                     } else null
+
+                    val visionImages = when {
+                        isImg -> listOfNotNull(
+                            com.example.runtime.MediaVisionHelper.encodeImageBytesToBase64(bytes, name)
+                        )
+                        name.lowercase().endsWith(".pdf") && (excerpt == null || excerpt.length < 50) -> {
+                            com.example.runtime.MediaVisionHelper.renderPdfPagesToImages(savedFile, name, maxPages = 3)
+                        }
+                        else -> emptyList()
+                    }
+
                     AgentUploadedAttachment(
                         displayName = name,
                         relativePath = relPath,
                         mimeType = mime,
                         sizeBytes = bytes.size.toLong(),
-                        textExcerpt = excerpt
+                        textExcerpt = excerpt,
+                        imageAttachments = visionImages
                     )
                 }.onSuccess { added.add(it) }
                     .onFailure { showBanner("Upload error: ${it.message}") }
@@ -628,7 +646,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 "py" -> withContext(Dispatchers.IO) { container.pythonEngine.executeScript(content) }
                 "js", "ts" -> container.jsEngine.executeJs(content, isTypeScript = ext == "ts")
                 "sh" -> {
-                    val shellRes = container.linuxEnv.executeCommand("sh ../$path", confirmedLevel2 = false)
+                    val shellRes = container.linuxEnv.executeCommand("sh $path", confirmedLevel2 = false)
                     ScriptExecutionResult(
                         success = shellRes.exitCode == 0,
                         stdout = shellRes.stdout,

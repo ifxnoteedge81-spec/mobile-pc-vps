@@ -24,13 +24,20 @@ data class ToolCallRequest(
     val thoughtSignature: String? = null
 )
 
+data class AiImageAttachment(
+    val displayName: String,
+    val mimeType: String,
+    val base64Data: String
+)
+
 data class AiMessage(
     val role: String, // "user", "assistant", "tool"
     val content: String,
     val toolCalls: List<ToolCallRequest> = emptyList(),
     val toolCallId: String? = null,
     val toolName: String? = null,
-    val rawAssistantPartsJson: String? = null
+    val rawAssistantPartsJson: String? = null,
+    val imageAttachments: List<AiImageAttachment> = emptyList()
 )
 
 data class AiCompletionResult(

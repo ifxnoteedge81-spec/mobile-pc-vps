@@ -1,6 +1,7 @@
 package com.example.ai
 
 import com.example.security.NetworkAuditLogger
+import com.example.security.SecureKeyStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -19,9 +20,14 @@ class OpenRouterProvider(
     private val auditLogger: NetworkAuditLogger
 ) {
     private val client = OkHttpClient.Builder()
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(45, TimeUnit.SECONDS)
-        .writeTimeout(20, TimeUnit.SECONDS)
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(28, TimeUnit.SECONDS)
+        .writeTimeout(15, TimeUnit.SECONDS)
+        .build()
+
+    private val discoveryClient = OkHttpClient.Builder()
+        .connectTimeout(6, TimeUnit.SECONDS)
+        .readTimeout(7, TimeUnit.SECONDS)
         .build()
 
     @Volatile
@@ -32,18 +38,20 @@ class OpenRouterProvider(
     private val badToolModels = ConcurrentHashMap<String, Long>()
 
     suspend fun isKeyFreeTierOnly(apiKey: String): Boolean = withContext(Dispatchers.IO) {
-        val keyHash = apiKey.hashCode()
+        val cleanKey = SecureKeyStore.sanitizeSecret(apiKey)
+        if (cleanKey.isBlank()) return@withContext false
+        val keyHash = cleanKey.hashCode()
         val cached = freeTierCache[keyHash]
-        if (cached != null && System.currentTimeMillis() - cached.second < 5 * 60_000L) {
+        if (cached != null && System.currentTimeMillis() - cached.second < 10 * 60_000L) {
             return@withContext cached.first
         }
         val result = runCatching {
             val req = Request.Builder()
                 .url("https://openrouter.ai/api/v1/auth/key")
-                .addHeader("Authorization", "Bearer $apiKey")
+                .addHeader("Authorization", "Bearer $cleanKey")
                 .get()
                 .build()
-            client.newCall(req).execute().use { resp ->
+            discoveryClient.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) return@use true
                 val data = JSONObject(resp.body?.string().orEmpty()).optJSONObject("data") ?: return@use true
                 val isFreeTier = data.optBoolean("is_free_tier", true)
@@ -57,7 +65,8 @@ class OpenRouterProvider(
 
     suspend fun fetchAvailableModels(apiKey: String?, forceRefresh: Boolean = false): Result<List<OpenRouterModelInfo>> =
         withContext(Dispatchers.IO) {
-            val fresh = System.currentTimeMillis() - cachedModelsFetchedAt < 10 * 60_000L
+            val cleanKey = apiKey?.let { SecureKeyStore.sanitizeSecret(it) }?.takeIf { it.isNotBlank() }
+            val fresh = System.currentTimeMillis() - cachedModelsFetchedAt < 30 * 60_000L
             if (!forceRefresh && fresh && cachedModels.isNotEmpty()) {
                 return@withContext Result.success(cachedModels)
             }
@@ -65,10 +74,10 @@ class OpenRouterProvider(
                 val reqBuilder = Request.Builder()
                     .url("https://openrouter.ai/api/v1/models")
                     .get()
-                if (!apiKey.isNullOrBlank()) {
-                    reqBuilder.addHeader("Authorization", "Bearer $apiKey")
+                if (cleanKey != null) {
+                    reqBuilder.addHeader("Authorization", "Bearer $cleanKey")
                 }
-                client.newCall(reqBuilder.build()).execute().use { resp ->
+                discoveryClient.newCall(reqBuilder.build()).execute().use { resp ->
                     val raw = resp.body?.string().orEmpty()
                     check(resp.isSuccessful) { "OpenRouter models HTTP ${resp.code}" }
                     auditLogger.log("openrouter.ai", "Model Discovery", "200 OK", raw.length.toLong())
@@ -168,6 +177,10 @@ class OpenRouterProvider(
         stream: Boolean,
         onStreamChunk: (String) -> Unit = {}
     ): Result<AiCompletionResult> = withContext(Dispatchers.IO) {
+        val cleanKey = SecureKeyStore.sanitizeSecret(apiKey)
+        if (cleanKey.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("OpenRouter API key is empty or invalid."))
+        }
         val body = buildRequestBody(model, systemPrompt, messages, tools, stream && tools.isEmpty())
 
         var lastErr: Exception? = null
@@ -175,7 +188,7 @@ class OpenRouterProvider(
             try {
                 val request = Request.Builder()
                     .url("https://openrouter.ai/api/v1/chat/completions")
-                    .addHeader("Authorization", "Bearer $apiKey")
+                    .addHeader("Authorization", "Bearer $cleanKey")
                     .addHeader("HTTP-Referer", "https://personal-ai-computer.local")
                     .addHeader("X-Title", "Personal AI Computer")
                     .addHeader("Content-Type", "application/json")
@@ -238,7 +251,28 @@ class OpenRouterProvider(
         }
         for (msg in messages) {
             when (msg.role) {
-                "user" -> msgsJson.put(JSONObject().put("role", "user").put("content", msg.content))
+                "user" -> {
+                    if (msg.imageAttachments.isEmpty()) {
+                        msgsJson.put(JSONObject().put("role", "user").put("content", msg.content))
+                    } else {
+                        val contentArr = JSONArray().put(
+                            JSONObject()
+                                .put("type", "text")
+                                .put("text", msg.content)
+                        )
+                        msg.imageAttachments.forEach { img ->
+                            contentArr.put(
+                                JSONObject()
+                                    .put("type", "image_url")
+                                    .put(
+                                        "image_url",
+                                        JSONObject().put("url", "data:${img.mimeType};base64,${img.base64Data}")
+                                    )
+                            )
+                        }
+                        msgsJson.put(JSONObject().put("role", "user").put("content", contentArr))
+                    }
+                }
                 "assistant" -> {
                     val obj = JSONObject().put("role", "assistant")
                     if (msg.content.isNotBlank()) {
@@ -336,9 +370,10 @@ class OpenRouterProvider(
                 val fn = c.optJSONObject("function") ?: continue
                 val fnName = optNullableString(fn, "name").trim()
                 if (fnName.isBlank()) continue
-                val argsJson = when (val rawArgs = fn.opt("arguments")) {
+                val argsJson = when (val rawArgs: Any? = fn.opt("arguments")) {
                     is JSONObject -> rawArgs
                     is String -> parseArgsSafely(rawArgs)
+                    null -> JSONObject()
                     else -> JSONObject()
                 }
                 toolCalls.add(

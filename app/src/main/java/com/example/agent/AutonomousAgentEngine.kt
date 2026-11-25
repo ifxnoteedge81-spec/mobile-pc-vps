@@ -38,7 +38,10 @@ data class CommandFeedItem(
     val kind: FeedEntryKind,
     val title: String,
     val body: String,
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    val actionUrl: String? = null,
+    val shareRelativePath: String? = null,
+    val shareSecondaryPath: String? = null
 )
 
 data class AgentRuntimeState(
@@ -79,12 +82,27 @@ class AutonomousAgentEngine(
         userPrompt: String,
         attachments: List<AgentUploadedAttachment> = emptyList()
     ) {
+        launchCommandJob(userPrompt, attachments)
+    }
+
+    suspend fun executeCommandAndWait(
+        userPrompt: String,
+        attachments: List<AgentUploadedAttachment> = emptyList()
+    ): Boolean {
+        val job = launchCommandJob(userPrompt, attachments) ?: return false
+        job.join()
+        return _state.value.taskStatus == TaskStatus.COMPLETED
+    }
+
+    private fun launchCommandJob(
+        userPrompt: String,
+        attachments: List<AgentUploadedAttachment> = emptyList()
+    ): Job? {
         val trimmed = userPrompt.trim()
-        if (trimmed.isEmpty() && attachments.isEmpty()) return
+        if (trimmed.isEmpty() && attachments.isEmpty()) return null
 
         if (attachments.isEmpty() && (trimmed.startsWith("/sh ") || trimmed.startsWith("/py "))) {
-            runDirectLocalShortcut(trimmed)
-            return
+            return runDirectLocalShortcut(trimmed)
         }
 
         activeJob?.cancel()
@@ -93,9 +111,11 @@ class AutonomousAgentEngine(
         interventionDeferred?.complete("CANCELLED")
         interventionDeferred = null
 
-        activeJob = scope.launch(Dispatchers.IO) {
+        val job = scope.launch(Dispatchers.IO) {
             runAgentCycle(trimmed, attachments)
         }
+        activeJob = job
+        return job
     }
 
     fun pauseTask() {
@@ -160,8 +180,8 @@ class AutonomousAgentEngine(
         _state.update { it.copy(feed = emptyList(), streamingBuffer = "") }
     }
 
-    private fun runDirectLocalShortcut(cmd: String) {
-        scope.launch(Dispatchers.IO) {
+    private fun runDirectLocalShortcut(cmd: String): Job {
+        return scope.launch(Dispatchers.IO) {
             appendFeed(FeedEntryKind.USER_COMMAND, "Local Direct Command", cmd)
             val isPy = cmd.startsWith("/py ")
             val tool = if (isPy) "python_exec" else "shell_exec"
@@ -180,7 +200,14 @@ class AutonomousAgentEngine(
                 return@launch
             }
             val out = toolRegistry.execute(tool, args, approvedLevel2 = true)
-            appendFeed(FeedEntryKind.VERIFIED_TOOL_RESULT, "Verified: $tool", out.output)
+            appendFeed(
+                kind = FeedEntryKind.VERIFIED_TOOL_RESULT,
+                title = "Verified: $tool",
+                body = out.output,
+                actionUrl = out.actionUrl,
+                shareRelativePath = out.shareRelativePath,
+                shareSecondaryPath = out.shareSecondaryPath
+            )
         }
     }
 
@@ -198,6 +225,10 @@ class AutonomousAgentEngine(
                 append("\n\n[Attached Files: ${attachments.joinToString(", ") { it.displayName }}]")
             }
         }
+        val isFastChat = isFastConversationalTurn(trimmedPrompt = userPrompt.trim(), attachments = attachments)
+
+        val promptImages = attachments.flatMap { it.imageAttachments }.take(6)
+
         val enrichedPrompt = buildString {
             append(userPrompt.ifBlank { "Please inspect and analyze the uploaded files below." })
             if (attachments.isNotEmpty()) {
@@ -205,7 +236,9 @@ class AutonomousAgentEngine(
                 attachments.forEach { att ->
                     append("\n- Name: ${att.displayName} | Path: ${att.relativePath} | Type: ${att.mimeType} | Size: ${att.sizeBytes}B")
                     if (!att.textExcerpt.isNullOrBlank()) {
-                        append("\n  Content Preview:\n  ${att.textExcerpt.take(2500)}")
+                        append("\n  Extracted Content:\n  ${att.textExcerpt.take(5500)}")
+                    } else if (att.imageAttachments.isNotEmpty()) {
+                        append("\n  Visual Vision Pages/Images Attached: ${att.imageAttachments.size} image(s) sent inline directly to your vision input — read and analyze them directly!")
                     }
                 }
             }
@@ -226,13 +259,75 @@ class AutonomousAgentEngine(
                 isPaused = false,
                 pendingIntervention = null,
                 activeModelLabel = modelLabel,
-                currentPhaseLabel = "Step 1: Planning with memory & live API...",
+                currentPhaseLabel = if (isFastChat) "Fast Reply..." else "Step 1: Planning with memory & live API...",
                 streamingBuffer = ""
             )
         }
 
         if (resources.warningMessage != null) {
             repository.appendLog(taskId, 0, "RESOURCE", "Resource Guard", resources.warningMessage)
+        }
+
+        // Sub-5-second fast path for simple greetings & short conversational questions
+        if (isFastChat) {
+            val fastPrompt = "You are Personal AI Computer, a helpful, ultra-fast autonomous AI computer assistant. Reply naturally, concisely, and warmly in the user's language (Bangla or English)."
+            val conversation = mutableListOf<AiMessage>().apply {
+                addAll(sessionTurns.takeLast(4))
+                add(AiMessage(role = "user", content = enrichedPrompt))
+            }
+            val fastRes = router.complete(
+                settings = settings,
+                complexity = TaskComplexity.SIMPLE,
+                systemPrompt = fastPrompt,
+                messages = conversation,
+                tools = emptyList(),
+                fastMode = true,
+                onStreamChunk = { chunk ->
+                    _state.update { cur -> cur.copy(streamingBuffer = cur.streamingBuffer + chunk) }
+                }
+            )
+            if (fastRes.isSuccess) {
+                val completion = fastRes.getOrThrow()
+                val tokens = completion.promptTokens + completion.completionTokens
+                val reply = completion.text.ifBlank { "হ্যালো! বলো, আজ কীভাবে সাহায্য করতে পারি?" }
+                val slotTag = completion.keySlotLabel?.let { "$it • " }.orEmpty()
+                repository.appendLog(taskId, 1, "AI_RESPONSE", "Fast Reply", reply, verified = true)
+                appendFeed(FeedEntryKind.AI_REASONING, "AI (${completion.provider} • $slotTag${completion.model})", reply)
+                sessionTurns.add(AiMessage(role = "user", content = displayUserText))
+                sessionTurns.add(AiMessage(role = "assistant", content = reply.take(1500)))
+                while (sessionTurns.size > 12) sessionTurns.removeAt(0)
+                repository.getTask(taskId)?.let {
+                    repository.updateTask(
+                        it.copy(
+                            status = TaskStatus.COMPLETED,
+                            finalReport = reply,
+                            modelUsed = "${completion.provider} ($slotTag${completion.model})",
+                            tokensUsed = tokens
+                        )
+                    )
+                }
+                _state.update {
+                    it.copy(
+                        isBusy = false,
+                        taskStatus = TaskStatus.COMPLETED,
+                        activeModelLabel = "${completion.provider} ($slotTag${completion.model})",
+                        currentPhaseLabel = "Completed ($tokens tokens)",
+                        streamingBuffer = ""
+                    )
+                }
+                return
+            }
+            // If fast path fails, fall through to error handler cleanly via standard result handling
+            val errMsg = fastRes.exceptionOrNull()?.message ?: "AI Provider Error"
+            repository.appendLog(taskId, 1, "ERROR", "Provider Error", errMsg)
+            repository.getTask(taskId)?.let {
+                repository.updateTask(it.copy(status = TaskStatus.FAILED, finalReport = errMsg))
+            }
+            appendFeed(FeedEntryKind.ERROR_NOTICE, "AI Gateway Notice", errMsg)
+            _state.update {
+                it.copy(isBusy = false, taskStatus = TaskStatus.FAILED, currentPhaseLabel = "Failed", streamingBuffer = "")
+            }
+            return
         }
 
         val memories = repository.getMemorySnapshot()
@@ -272,20 +367,24 @@ class AutonomousAgentEngine(
 
             CORE EXECUTION RULES (NO-EXCUSES AUTONOMY + SELF-HEALING):
             1. Reply in the user's language (Bangla or English). Execute real tool calls directly until the goal is completely finished and verified.
-            2. NEVER say "I cannot draw/design CAD" or give fake placeholders:
+            2. DOCUMENT & PDF READING:
+               - For ANY `.pdf`, `.docx`, `.txt`, `.csv`, or `.json` file (such as a CV/Resume in `uploads/`), call `file_read(path="uploads/...")` directly — `file_read` has a built-in PDF/DOCX text extractor! Or in Python use `extract_pdf_text("uploads/...")` / `PdfReader(...)`. Never run raw binary decoding scripts first.
+            3. CV-TO-JOB SEARCH & APPLICATION WORKFLOW:
+               - Extract candidate skills, roles, location, contact info, and experience from the CV -> search real active job boards via `browser_open_and_read` (e.g., query or direct public APIs like `https://remotive.com/api/remote-jobs?search=...`, `https://www.arbeitnow.com/api/job-board-api`, `bdjobs.com`, `linkedin.com/jobs`) -> pick matching openings -> open application page in Live Browser -> fill fields using `browser_fill` / `browser_click` -> pause with `request_human_intervention` whenever CAPTCHA, login/OTP, or final application review/submission requires the user.
+            4. NEVER say "I cannot draw/design CAD" or give fake placeholders:
                - For ANY AutoCAD / floor plan / architectural / mechanical / 2D or 3D engineering drawing task, calculate exact real-world coordinates in Python (`python_exec`) if complex, then call `cad_generate_drawing` with detailed `entities_json` (`rect`, `line`, `circle`, `arc`, `polyline`, `dimension`, `text`, proper CAD layers) and optionally `extrude_height_3d`. Open the generated viewer URL in `browser_open_and_read` so the user sees the live blueprint immediately, and offer sharing the `.dxf`/`.stl` via `device_intent_action`!
-            3. SELF-HEALING ON ERRORS:
-               - If ANY tool fails, never give up or repeat the identical broken call: diagnose root cause, fix scripts/arguments, switch to an alternative strategy (e.g. `http_request` <-> `browser_open_and_read`, `shell_exec` <-> `python_exec`, UI element not found -> `scroll_to_text` + `wait_and_inspect`), and verify success.
-            4. HARDWARE-ADAPTIVE EXECUTION:
+            5. SELF-HEALING ON ERRORS:
+               - If ANY tool fails, never give up or repeat the identical broken call: diagnose root cause, fix scripts/arguments, switch to an alternative strategy (e.g. `http_request` <-> `browser_open_and_read`, `shell_exec` <-> `python_exec` <-> `file_read`, UI element not found -> `scroll_to_text` + `wait_and_inspect`), and verify success.
+            6. HARDWARE-ADAPTIVE EXECUTION:
                - Respect this Android phone's real hardware capacity below (${resources.deviceTierLabel} | Max Steps: ${resources.recommendedMaxAgentSteps}). For huge data, stream/chunk cleanly using files & Python scripts instead of bloating RAM.
-            5. APP & ONLINE AUTONOMY:
+            7. APP & ONLINE AUTONOMY:
                - Use `app_list` -> `app_launch` (or `app_install_store` if missing) -> `device_screen_inspect` + `device_virtual_hand`.
-            6. UNIVERSAL AUTO-SKILL ADAPTER:
+            8. UNIVERSAL AUTO-SKILL ADAPTER:
                - Whenever the user attaches a skill file/ZIP, gives a skill GitHub/URL, or pastes skill docs, call `skill_import_auto` immediately. When a task matches an imported skill below, call `skill_load(slug=..., query=...)` first and adapt its steps onto our Android tools.
-            7. OTP / CAPTCHA / 2FA LIVE SCREEN HANDOFF:
+            9. OTP / CAPTCHA / 2FA LIVE SCREEN HANDOFF:
                - Immediately call `request_human_intervention` (`target_mode` = 'BROWSER' or 'VIRTUAL_HANDS') when human verification appears, then continue seamlessly once resumed.
-            8. MEMORY CONTINUITY:
-               - Call `memory_save` proactively for key user workflows, CAD preferences, and project facts.$attachmentHint
+            10. MEMORY CONTINUITY:
+               - Call `memory_save` proactively for key user workflows, CV profile highlights, CAD preferences, and project facts.$attachmentHint
 
             Device Tier: ${resources.deviceTierLabel} | RAM: ${resources.availableRamMb}/${resources.totalPhysicalRamMb} MB (Budget: ${settings.ramBudgetMb} MB) | Workspace ROM: ${"%.1f".format(resources.virtualEnvUsedMb)}/${settings.storageQuotaMb} MB | Virtual Hands: ${if (com.example.accessibility.PersonalAiAccessibilityService.isConnected.value) "CONNECTED" else "NOT ENABLED"}
             Imported Auto-Skills Index:
@@ -298,14 +397,18 @@ class AutonomousAgentEngine(
             $continuityContext
         """.trimIndent()
 
-        // Include recent session conversation turns (clean user/assistant context) + current user command
+        // Include recent session conversation turns (clean user/assistant context) + current user command (with inline vision images if any)
         val conversation = mutableListOf<AiMessage>().apply {
             addAll(sessionTurns.takeLast(8))
-            add(AiMessage(role = "user", content = enrichedPrompt))
+            add(AiMessage(role = "user", content = enrichedPrompt, imageAttachments = promptImages))
         }
 
         val complexity = classifyComplexity(enrichedPrompt)
-        val declarations = toolRegistry.getDeclarations()
+        val declarations = toolRegistry.getDeclarationsForPrompt(
+            userPrompt = enrichedPrompt,
+            hasAttachments = attachments.isNotEmpty(),
+            hasImportedSkills = importedSkills.isNotEmpty()
+        )
 
         var step = 1
         var totalTokens = 0
@@ -415,7 +518,10 @@ class AutonomousAgentEngine(
                     appendFeed(
                         kind = if (outcome.success) FeedEntryKind.VERIFIED_TOOL_RESULT else FeedEntryKind.ERROR_NOTICE,
                         title = "Tool: ${call.name}",
-                        body = outcome.output.take(1200)
+                        body = outcome.output.take(1200),
+                        actionUrl = outcome.actionUrl,
+                        shareRelativePath = outcome.shareRelativePath,
+                        shareSecondaryPath = outcome.shareSecondaryPath
                     )
 
                     var finalToolOutput = outcome.output
@@ -543,10 +649,59 @@ class AutonomousAgentEngine(
         }
     }
 
-    private fun appendFeed(kind: FeedEntryKind, title: String, body: String) {
+    private fun appendFeed(
+        kind: FeedEntryKind,
+        title: String,
+        body: String,
+        actionUrl: String? = null,
+        shareRelativePath: String? = null,
+        shareSecondaryPath: String? = null
+    ) {
         _state.update { cur ->
-            cur.copy(feed = (cur.feed + CommandFeedItem(kind = kind, title = title, body = body)).takeLast(80))
+            cur.copy(
+                feed = (
+                    cur.feed + CommandFeedItem(
+                        kind = kind,
+                        title = title,
+                        body = body,
+                        actionUrl = actionUrl,
+                        shareRelativePath = shareRelativePath,
+                        shareSecondaryPath = shareSecondaryPath
+                    )
+                ).takeLast(80)
+            )
         }
+    }
+
+    private fun isFastConversationalTurn(
+        trimmedPrompt: String,
+        attachments: List<AgentUploadedAttachment>
+    ): Boolean {
+        if (attachments.isNotEmpty()) return false
+        if (trimmedPrompt.length > 140) return false
+        val lower = trimmedPrompt.lowercase()
+        val exactGreetings = setOf(
+            "hi", "hii", "hiii", "hello", "hey", "helo", "yo", "sup",
+            "good morning", "good afternoon", "good evening", "good night",
+            "assalamu alaikum", "salam", "walaikum assalam", "thanks", "thank you", "ok", "okay",
+            "হাই", "হ্যালো", "হেলো", "সালাম", "আসসালামু আলাইকুম", "কেমন আছো", "কেমন আছেন",
+            "কি অবস্থা", "কী অবস্থা", "ধন্যবাদ", "ওকে", "ঠিক আছে", "তুমি কে", "কে তুমি"
+        )
+        if (lower in exactGreetings) return true
+
+        val actionKeywords = listOf(
+            "file", "upload", "pdf", "python", "script", "shell", "terminal", "bash",
+            "code", "html", "autocad", "cad", "dxf", "stl", "3d", "blueprint", "floor plan",
+            "browser", "open", "click", "search", "google", "http", "url", "website",
+            "job", "apply", "cv", "resume", "youtube", "video", "app", "install", "launch",
+            "virtual hand", "screen", "tap", "swipe", "skill", "import", "github", "memory",
+            "schedule", "server", "ram", "rom", "hardware", "download", "write", "create", "build",
+            "run", "execute", "delete", "list", "check", "find",
+            "ফাইল", "সিভি", "জব", "চাকরি", "এপ্লাই", "স্ক্রিপ্ট", "ব্রাউজার", "ড্রয়িং", "ডিজাইন",
+            "অ্যাপ", "ইনস্টল", "ডাউনলোড", "স্কিল", "সার্চ", "তৈরি", "বানাও", "খোলো", "করো", "দাও", "চেক"
+        )
+        if (actionKeywords.any { lower.contains(it) }) return false
+        return trimmedPrompt.split(Regex("\\s+")).size <= 10
     }
 
     private fun classifyComplexity(prompt: String): TaskComplexity {

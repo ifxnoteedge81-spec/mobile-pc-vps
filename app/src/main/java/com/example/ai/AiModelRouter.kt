@@ -70,12 +70,16 @@ class AiModelRouter(
         }
     }
 
+    @Volatile
+    private var lastHealthyGeminiSlot: SecretSlot? = null
+
     suspend fun complete(
         settings: AppSettings,
         complexity: TaskComplexity,
         systemPrompt: String,
         messages: List<AiMessage>,
         tools: List<ToolDeclaration>,
+        fastMode: Boolean = false,
         onStreamChunk: (String) -> Unit = {}
     ): Result<AiCompletionResult> {
         if (!isOnline()) {
@@ -106,7 +110,8 @@ class AiModelRouter(
                     keys = configuredGeminiKeys,
                     configuredModel = settings.geminiModel,
                     complexity = complexity,
-                    preferFast = settings.preferFreeModelsOnSimpleTasks,
+                    preferFast = fastMode || settings.preferFreeModelsOnSimpleTasks,
+                    fastMode = fastMode,
                     systemPrompt = systemPrompt,
                     messages = messages,
                     tools = tools,
@@ -117,7 +122,7 @@ class AiModelRouter(
                     apiKey = openRouterKey!!,
                     configuredModel = settings.openRouterModel,
                     complexity = complexity,
-                    preferFree = settings.preferFreeModelsOnSimpleTasks,
+                    preferFree = fastMode || settings.preferFreeModelsOnSimpleTasks,
                     systemPrompt = systemPrompt,
                     messages = messages,
                     tools = tools,
@@ -152,6 +157,7 @@ class AiModelRouter(
         configuredModel: String,
         complexity: TaskComplexity,
         preferFast: Boolean,
+        fastMode: Boolean,
         systemPrompt: String,
         messages: List<AiMessage>,
         tools: List<ToolDeclaration>,
@@ -163,13 +169,18 @@ class AiModelRouter(
         }
 
         val now = System.currentTimeMillis()
+        val sticky = lastHealthyGeminiSlot
         val startOffset = Math.floorMod(geminiRotationCursor.getAndIncrement(), keys.size)
         val rotatedKeys = List(keys.size) { i -> keys[(startOffset + i) % keys.size] }
 
-        // Try healthy (non-cooled-down) keys first, then fall back to cooled-down keys if all are cooling down
+        // Prioritize sticky healthy key (if not cooling down), then healthy keys, then cooled-down keys
         val orderedKeys = rotatedKeys.sortedBy { (slot, _) ->
             val until = keyCooldownUntil[slot] ?: 0L
-            if (until > now) 1 else 0
+            when {
+                until > now -> 2
+                slot == sticky -> 0
+                else -> 1
+            }
         }
 
         var lastError: Throwable? = null
@@ -187,7 +198,6 @@ class AiModelRouter(
                 continue
             }
 
-            // Try top 2 fast/capable models per key so key rotation is super quick
             var keyQuotaOrAuthFailed = false
             for (modelId in candidates.take(2)) {
                 val res = geminiProvider.generate(
@@ -197,10 +207,12 @@ class AiModelRouter(
                     messages = messages,
                     tools = tools,
                     stream = stream,
+                    fastMode = fastMode,
                     onStreamChunk = onStreamChunk
                 )
                 if (res.isSuccess) {
                     keyCooldownUntil.remove(slot)
+                    lastHealthyGeminiSlot = slot
                     val slotNum = SecureKeyStore.geminiSlots.indexOf(slot) + 1
                     return Result.success(res.getOrThrow().copy(keySlotLabel = "Key #$slotNum"))
                 }

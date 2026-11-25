@@ -73,7 +73,7 @@ class VirtualWorkspaceManager(baseFilesDir: File) {
                 uname -a
                 echo "PWD: $(pwd)"
                 echo "Files in workspace:"
-                ls -la ../workspace
+                ls -la workspace
                 """.trimIndent()
             )
         }
@@ -167,8 +167,18 @@ class VirtualWorkspaceManager(baseFilesDir: File) {
     fun readTextFile(relativePath: String): Result<String> = runCatching {
         val file = resolveSafe(relativePath)
         require(file.exists() && file.isFile) { "File not found: $relativePath" }
-        require(file.length() <= 2_000_000) { "File too large to open in editor (>2MB)" }
-        file.readText()
+        if (DocumentTextExtractor.isStructuredDocument(file.name)) {
+            require(file.length() <= 15_000_000) { "Document too large to extract (>15MB)" }
+            val extracted = DocumentTextExtractor.extractText(file, maxChars = 24_000)
+            if (extracted.isBlank()) {
+                "[Document '${file.name}' (${file.length()}B) contains scanned/image pages or non-standard font encoding with no extractable embedded text.]"
+            } else {
+                "[Extracted Document Text (${file.name}, ${extracted.length} chars)]\n$extracted"
+            }
+        } else {
+            require(file.length() <= 2_000_000) { "File too large to open in editor (>2MB)" }
+            file.readText()
+        }
     }
 
     fun writeTextFile(relativePath: String, content: String): Result<File> = runCatching {

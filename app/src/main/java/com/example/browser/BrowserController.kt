@@ -31,7 +31,8 @@ data class BrowserTab(
     val title: String = "New Tab",
     val url: String = "https://duckduckgo.com",
     val isLoading: Boolean = false,
-    val progress: Int = 0
+    val progress: Int = 0,
+    val navigationSeq: Long = 1L
 )
 
 data class PageSnapshot(
@@ -77,22 +78,42 @@ class BrowserController(
         webViewRef = WeakReference(webView)
     }
 
+    fun detachWebView(webView: WebView) {
+        if (webViewRef?.get() === webView) {
+            webViewRef = null
+        }
+    }
+
     fun getActiveTab(): BrowserTab {
         val id = _activeTabId.value
         return _tabs.value.firstOrNull { it.id == id } ?: _tabs.value.first()
     }
 
     fun newTab(url: String = "https://duckduckgo.com"): BrowserTab {
-        val tab = BrowserTab(title = "Loading...", url = normalizeUrlOrSearch(url))
+        val tab = BrowserTab(title = "Loading...", url = normalizeUrlOrSearch(url), navigationSeq = System.nanoTime())
         _tabs.update { it + tab }
         _activeTabId.value = tab.id
+        _browserActivitySignal.value = System.currentTimeMillis()
         log("Opened tab: ${tab.url}")
         return tab
+    }
+
+    fun openUrlInActiveOrNewTab(url: String) {
+        val target = normalizeUrlOrSearch(url)
+        val cur = getActiveTab()
+        if (cur.url == target) {
+            updateActiveTabMeta(url = target, isLoading = true, progress = 10, bumpNavigation = true)
+        } else {
+            newTab(target)
+        }
+        _browserActivitySignal.value = System.currentTimeMillis()
+        webViewRef?.get()?.post { webViewRef?.get()?.loadUrl(target) }
     }
 
     fun switchTab(tabId: String) {
         if (_tabs.value.any { it.id == tabId }) {
             _activeTabId.value = tabId
+            updateActiveTabMeta(bumpNavigation = true)
             val targetUrl = getActiveTab().url
             webViewRef?.get()?.post { webViewRef?.get()?.loadUrl(targetUrl) }
         }
@@ -104,11 +125,18 @@ class BrowserController(
         _tabs.value = remaining
         if (_activeTabId.value == tabId) {
             _activeTabId.value = remaining.last().id
+            updateActiveTabMeta(bumpNavigation = true)
             webViewRef?.get()?.post { webViewRef?.get()?.loadUrl(remaining.last().url) }
         }
     }
 
-    fun updateActiveTabMeta(title: String? = null, url: String? = null, isLoading: Boolean? = null, progress: Int? = null) {
+    fun updateActiveTabMeta(
+        title: String? = null,
+        url: String? = null,
+        isLoading: Boolean? = null,
+        progress: Int? = null,
+        bumpNavigation: Boolean = false
+    ) {
         val activeId = _activeTabId.value
         _tabs.update { list ->
             list.map { tab ->
@@ -116,7 +144,8 @@ class BrowserController(
                     title = title?.takeIf { it.isNotBlank() } ?: tab.title,
                     url = url?.takeIf { it.isNotBlank() } ?: tab.url,
                     isLoading = isLoading ?: tab.isLoading,
-                    progress = progress ?: tab.progress
+                    progress = progress ?: tab.progress,
+                    navigationSeq = if (bumpNavigation) tab.navigationSeq + 1 else tab.navigationSeq
                 )
             }
         }
@@ -134,7 +163,7 @@ class BrowserController(
 
     suspend fun navigateAndWait(urlOrQuery: String): Result<PageSnapshot> = withContext(Dispatchers.Main) {
         val targetUrl = normalizeUrlOrSearch(urlOrQuery)
-        updateActiveTabMeta(url = targetUrl, isLoading = true, progress = 10)
+        updateActiveTabMeta(url = targetUrl, isLoading = true, progress = 10, bumpNavigation = true)
         _browserActivitySignal.value = System.currentTimeMillis()
         log("Navigate -> $targetUrl")
 
@@ -148,7 +177,11 @@ class BrowserController(
                 if (!tab.isLoading && tab.progress >= 95 && attempts >= 2) break
                 attempts++
             }
-            val snap = extractPageContentInternal(wv)
+            var snap = extractPageContentInternal(wv)
+            if (snap != null && snap.textContent.trim().length < 80) {
+                delay(700)
+                snap = extractPageContentInternal(wv)
+            }
             if (snap != null && snap.textContent.isNotBlank()) {
                 _lastExtractedSnapshot.value = snap
                 return@withContext Result.success(snap)
@@ -254,24 +287,39 @@ class BrowserController(
         method: String,
         url: String,
         body: String = "",
-        contentType: String = "application/json"
+        contentType: String = "application/json",
+        headers: Map<String, String> = emptyMap()
     ): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
             val cleanMethod = method.uppercase().ifBlank { "GET" }
             val builder = Request.Builder()
                 .url(url.trim())
-                .header("User-Agent", "PersonalAIComputer/1.0 Android")
+            var hasUserAgent = false
+            headers.forEach { (k, v) ->
+                val cleanName = k.trim()
+                val cleanVal = v.replace(Regex("[\\u0000-\\u001F\\u007F]"), "")
+                if (cleanName.isNotEmpty()) {
+                    if (cleanName.equals("User-Agent", ignoreCase = true)) hasUserAgent = true
+                    builder.header(cleanName, cleanVal)
+                }
+            }
+            if (!hasUserAgent) {
+                builder.header("User-Agent", "PersonalAIComputer/1.0 Android")
+            }
+            val mediaType = contentType.ifBlank { "application/json" }.toMediaType()
             when (cleanMethod) {
-                "POST" -> builder.post(body.toRequestBody(contentType.toMediaType()))
-                "PUT" -> builder.put(body.toRequestBody(contentType.toMediaType()))
-                "DELETE" -> builder.delete()
+                "POST" -> builder.post(body.toRequestBody(mediaType))
+                "PUT" -> builder.put(body.toRequestBody(mediaType))
+                "PATCH" -> builder.patch(body.toRequestBody(mediaType))
+                "HEAD" -> builder.head()
+                "DELETE" -> if (body.isNotBlank()) builder.delete(body.toRequestBody(mediaType)) else builder.delete()
                 else -> builder.get()
             }
             httpClient.newCall(builder.build()).execute().use { resp ->
                 val raw = resp.body?.string().orEmpty()
                 auditLogger.log(url.substringAfter("://").substringBefore("/"), "HTTP $cleanMethod", "HTTP ${resp.code}", raw.length.toLong())
-                check(resp.isSuccessful) { "HTTP ${resp.code}: ${raw.take(400)}" }
-                raw.take(5000)
+                check(resp.isSuccessful) { "HTTP ${resp.code}: ${raw.take(600)}" }
+                "HTTP ${resp.code} ${resp.message}\n${raw.take(6000)}"
             }
         }
     }
@@ -391,7 +439,7 @@ class BrowserController(
         return when {
             t.startsWith("http://") || t.startsWith("https://") -> t
             t.contains(".") && !t.contains(" ") -> "https://$t"
-            else -> "https://duckduckgo.com/?q=${URLEncoder.encode(t, "UTF-8")}"
+            else -> "https://html.duckduckgo.com/html/?q=${URLEncoder.encode(t, "UTF-8")}"
         }
     }
 

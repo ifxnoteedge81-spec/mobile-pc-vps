@@ -2,9 +2,14 @@ package com.example.ui.screens
 
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
+import android.net.Uri
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -55,6 +60,9 @@ import com.example.browser.BrowserTab
 import com.example.browser.PageSnapshot
 import com.example.storage.BookmarkEntity
 import com.example.ui.components.GlassOsCard
+import com.example.ui.components.WebViewUploadChooserDialog
+import com.example.ui.components.configureAgentWebView
+import com.example.ui.components.flushWebViewCookies
 
 @SuppressLint("SetJavaScriptEnabled")
 @OptIn(ExperimentalMaterial3Api::class)
@@ -72,7 +80,27 @@ fun BrowserScreen(
     val activeTab = tabs.firstOrNull { it.id == activeTabId } ?: tabs.first()
     var addressInput by remember(activeTabId, activeTab.url) { mutableStateOf(activeTab.url) }
     var webViewInstance by remember { mutableStateOf<WebView?>(null) }
+    var lastSyncedSeq by remember { mutableStateOf(activeTab.navigationSeq) }
+    var lastSyncedTabId by remember { mutableStateOf(activeTab.id) }
     var showDomDialog by remember { mutableStateOf(false) }
+    var pendingFileCallback by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
+    var pendingAcceptTypes by remember { mutableStateOf(arrayOf("*/*")) }
+
+    val webUploadLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        pendingFileCallback?.onReceiveValue(if (uris.isNotEmpty()) uris.toTypedArray() else null)
+        pendingFileCallback = null
+    }
+
+    DisposableEffect(webViewInstance) {
+        onDispose {
+            flushWebViewCookies()
+            webViewInstance?.let { browserController.detachWebView(it) }
+            pendingFileCallback?.onReceiveValue(null)
+            pendingFileCallback = null
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -212,10 +240,7 @@ fun BrowserScreen(
         AndroidView(
             factory = { ctx ->
                 WebView(ctx).apply {
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    settings.builtInZoomControls = true
-                    settings.displayZoomControls = false
+                    configureAgentWebView(this)
                     webViewClient = object : WebViewClient() {
                         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                             if (url != null) {
@@ -225,6 +250,7 @@ fun BrowserScreen(
                         }
 
                         override fun onPageFinished(view: WebView?, url: String?) {
+                            flushWebViewCookies()
                             browserController.updateActiveTabMeta(
                                 title = view?.title,
                                 url = url,
@@ -237,21 +263,54 @@ fun BrowserScreen(
                         override fun onProgressChanged(view: WebView?, newProgress: Int) {
                             browserController.updateActiveTabMeta(progress = newProgress)
                         }
+
+                        override fun onShowFileChooser(
+                            webView: WebView?,
+                            filePathCallback: ValueCallback<Array<Uri>>?,
+                            fileChooserParams: FileChooserParams?
+                        ): Boolean {
+                            pendingFileCallback?.onReceiveValue(null)
+                            pendingFileCallback = filePathCallback
+                            val accepts = fileChooserParams?.acceptTypes
+                                ?.map { it.trim() }
+                                ?.filter { it.isNotBlank() && it.contains("/") }
+                                ?.toTypedArray()
+                            pendingAcceptTypes = if (accepts != null && accepts.isNotEmpty()) accepts else arrayOf("*/*")
+                            return true
+                        }
                     }
                     browserController.attachWebView(this)
                     webViewInstance = this
+                    lastSyncedTabId = activeTab.id
+                    lastSyncedSeq = activeTab.navigationSeq
                     loadUrl(activeTab.url)
                 }
             },
             update = { wv ->
                 browserController.attachWebView(wv)
                 webViewInstance = wv
+                if (lastSyncedTabId != activeTab.id || lastSyncedSeq != activeTab.navigationSeq) {
+                    lastSyncedTabId = activeTab.id
+                    lastSyncedSeq = activeTab.navigationSeq
+                    if (wv.url != activeTab.url) {
+                        wv.loadUrl(activeTab.url)
+                    }
+                }
             },
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
         )
     }
+
+    WebViewUploadChooserDialog(
+        pendingCallback = pendingFileCallback,
+        onPickFromPhone = { webUploadLauncher.launch(pendingAcceptTypes) },
+        onDeliverWorkspaceUris = { uris ->
+            pendingFileCallback?.onReceiveValue(uris)
+            pendingFileCallback = null
+        }
+    )
 
     if (showDomDialog) {
         AlertDialog(

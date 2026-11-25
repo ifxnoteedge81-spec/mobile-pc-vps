@@ -23,7 +23,8 @@ data class AgentUploadedAttachment(
     val relativePath: String,
     val mimeType: String,
     val sizeBytes: Long,
-    val textExcerpt: String? = null
+    val textExcerpt: String? = null,
+    val imageAttachments: List<com.example.ai.AiImageAttachment> = emptyList()
 )
 
 object AgentSkillRegistry {
