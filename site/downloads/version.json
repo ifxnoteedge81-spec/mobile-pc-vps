@@ -1,13 +1,13 @@
 {
   "appName": "Personal AI Computer",
-  "version": "main-6",
+  "version": "main-7",
   "buildType": "debug-build",
-  "releaseDate": "2026-11-25T11:43:03Z",
+  "releaseDate": "2026-11-25T12:55:22Z",
   "apkFile": "downloads/personal-ai-computer.apk",
   "releaseDownloadUrl": "https://github.com/ifxnoteedge81-spec/mobile-pc-vps/releases/download/latest/personal-ai-computer.apk",
   "repo": "ifxnoteedge81-spec/mobile-pc-vps",
-  "sizeBytes": 21828503,
-  "sha256": "449a8b45519c3fc9717dc6242a42a20530b320d0fbcfba53d471405dcc226765",
+  "sizeBytes": 21844887,
+  "sha256": "b1f62c2c12c3bea203f10f15444bc2ce1f7e384529567d429362a7f12f60fd97",
   "minAndroid": "Android 7.0 (API 24)",
   "changelog": [
     "Autonomous OpenClaw-inspired Agent Engine (Bangla & English)",
