@@ -20,7 +20,8 @@ data class ToolDeclaration(
 data class ToolCallRequest(
     val id: String,
     val name: String,
-    val arguments: JSONObject
+    val arguments: JSONObject,
+    val thoughtSignature: String? = null
 )
 
 data class AiMessage(
@@ -28,7 +29,8 @@ data class AiMessage(
     val content: String,
     val toolCalls: List<ToolCallRequest> = emptyList(),
     val toolCallId: String? = null,
-    val toolName: String? = null
+    val toolName: String? = null,
+    val rawAssistantPartsJson: String? = null
 )
 
 data class AiCompletionResult(
@@ -37,7 +39,9 @@ data class AiCompletionResult(
     val text: String,
     val toolCalls: List<ToolCallRequest> = emptyList(),
     val promptTokens: Int = 0,
-    val completionTokens: Int = 0
+    val completionTokens: Int = 0,
+    val rawAssistantPartsJson: String? = null,
+    val keySlotLabel: String? = null
 )
 
 data class GeminiModelInfo(

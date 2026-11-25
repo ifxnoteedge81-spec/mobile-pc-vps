@@ -12,7 +12,7 @@ import javax.crypto.spec.GCMParameterSpec
 
 /**
  * Encrypts and stores API keys and OAuth tokens locally using Android Keystore AES-256-GCM.
- * Keys never leave the device except when sent directly to the user-selected AI provider over HTTPS.
+ * Supports 5 rotating Google Gemini API Key slots plus OpenRouter fallback.
  */
 class SecureKeyStore(context: Context) {
 
@@ -25,7 +25,7 @@ class SecureKeyStore(context: Context) {
             return
         }
         val encrypted = encrypt(trimmed)
-        prefs.edit().putString(slot.prefKey, encrypted).apply()
+        prefs.edit().putString(slot.prefKey, encrypted).commit()
     }
 
     fun getSecret(slot: SecretSlot): String? {
@@ -35,17 +35,26 @@ class SecureKeyStore(context: Context) {
 
     fun hasSecret(slot: SecretSlot): Boolean = !getSecret(slot).isNullOrBlank()
 
+    fun getConfiguredGeminiKeys(): List<Pair<SecretSlot, String>> {
+        return geminiSlots.mapNotNull { slot ->
+            val key = getSecret(slot)?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            slot to key
+        }
+    }
+
+    fun hasAnyGeminiKey(): Boolean = geminiSlots.any { hasSecret(it) }
+
     fun getMaskedPreview(slot: SecretSlot): String {
         val raw = getSecret(slot) ?: return "Not configured"
         return if (raw.length <= 8) "••••••••" else "${raw.take(4)}••••${raw.takeLast(4)}"
     }
 
     fun deleteSecret(slot: SecretSlot) {
-        prefs.edit().remove(slot.prefKey).apply()
+        prefs.edit().remove(slot.prefKey).commit()
     }
 
     fun clearAllSecrets() {
-        prefs.edit().clear().apply()
+        prefs.edit().clear().commit()
     }
 
     private fun getOrCreateKey(): SecretKey {
@@ -90,7 +99,11 @@ class SecureKeyStore(context: Context) {
     }
 
     enum class SecretSlot(val prefKey: String, val label: String) {
-        GEMINI_API_KEY("enc_gemini_api_key", "Google Gemini API Key"),
+        GEMINI_API_KEY("enc_gemini_api_key", "Google Gemini API Key #1"),
+        GEMINI_API_KEY_2("enc_gemini_api_key_2", "Google Gemini API Key #2"),
+        GEMINI_API_KEY_3("enc_gemini_api_key_3", "Google Gemini API Key #3"),
+        GEMINI_API_KEY_4("enc_gemini_api_key_4", "Google Gemini API Key #4"),
+        GEMINI_API_KEY_5("enc_gemini_api_key_5", "Google Gemini API Key #5"),
         OPENROUTER_API_KEY("enc_openrouter_api_key", "OpenRouter API Key"),
         YOUTUBE_OAUTH_TOKEN("enc_youtube_oauth_token", "YouTube Data API OAuth Token")
     }
@@ -100,5 +113,13 @@ class SecureKeyStore(context: Context) {
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"
         private const val KEY_ALIAS = "PersonalAiMasterKeyV1"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
+
+        val geminiSlots = listOf(
+            SecretSlot.GEMINI_API_KEY,
+            SecretSlot.GEMINI_API_KEY_2,
+            SecretSlot.GEMINI_API_KEY_3,
+            SecretSlot.GEMINI_API_KEY_4,
+            SecretSlot.GEMINI_API_KEY_5
+        )
     }
 }

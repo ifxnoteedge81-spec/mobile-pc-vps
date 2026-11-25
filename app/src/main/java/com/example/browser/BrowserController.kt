@@ -14,13 +14,16 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.lang.ref.WeakReference
 import java.net.URLEncoder
+import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 
 data class BrowserTab(
@@ -40,9 +43,7 @@ data class PageSnapshot(
 )
 
 /**
- * WebView-backed Browser Automation Adapter.
- * Note: Stock Android APKs cannot bundle a desktop Playwright Chromium binary, so this adapter
- * implements equivalent semantic browser automation directly on Android's native Chromium WebView.
+ * WebView-backed Browser Automation Adapter + fast direct HTTP client.
  */
 class BrowserController(
     private val workspace: VirtualWorkspaceManager,
@@ -61,8 +62,16 @@ class BrowserController(
     private val _automationLog = MutableStateFlow<List<String>>(emptyList())
     val automationLog: StateFlow<List<String>> = _automationLog.asStateFlow()
 
+    // Triggers Live Screen auto-expand in CommandCenterScreen when browser tools run
+    private val _browserActivitySignal = MutableStateFlow(0L)
+    val browserActivitySignal: StateFlow<Long> = _browserActivitySignal.asStateFlow()
+
     private var webViewRef: WeakReference<WebView>? = null
-    private val httpClient = OkHttpClient()
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(12, TimeUnit.SECONDS)
+        .readTimeout(25, TimeUnit.SECONDS)
+        .writeTimeout(15, TimeUnit.SECONDS)
+        .build()
 
     fun attachWebView(webView: WebView) {
         webViewRef = WeakReference(webView)
@@ -113,34 +122,45 @@ class BrowserController(
         }
     }
 
+    private suspend fun ensureWebViewReady(): WebView? {
+        webViewRef?.get()?.let { return it }
+        _browserActivitySignal.value = System.currentTimeMillis()
+        repeat(8) {
+            delay(180)
+            webViewRef?.get()?.let { return it }
+        }
+        return null
+    }
+
     suspend fun navigateAndWait(urlOrQuery: String): Result<PageSnapshot> = withContext(Dispatchers.Main) {
         val targetUrl = normalizeUrlOrSearch(urlOrQuery)
-        updateActiveTabMeta(url = targetUrl, isLoading = true)
+        updateActiveTabMeta(url = targetUrl, isLoading = true, progress = 10)
+        _browserActivitySignal.value = System.currentTimeMillis()
         log("Navigate -> $targetUrl")
 
-        val wv = webViewRef?.get()
+        val wv = ensureWebViewReady()
         if (wv != null) {
             wv.loadUrl(targetUrl)
-            // Wait briefly for DOM settlement
             var attempts = 0
-            while (attempts < 16) {
-                delay(350)
-                if (!getActiveTab().isLoading && attempts >= 2) break
+            while (attempts < 14) {
+                delay(200)
+                val tab = getActiveTab()
+                if (!tab.isLoading && tab.progress >= 95 && attempts >= 2) break
                 attempts++
             }
             val snap = extractPageContentInternal(wv)
-            if (snap != null) {
+            if (snap != null && snap.textContent.isNotBlank()) {
                 _lastExtractedSnapshot.value = snap
                 return@withContext Result.success(snap)
             }
         }
 
-        // Fallback headless HTTP fetch if WebView UI hasn't mounted yet
+        // Fast headless HTTP fallback if WebView isn't mounted (e.g. background WorkManager)
         fetchLightweightHeadless(targetUrl)
     }
 
     suspend fun extractCurrentPage(): Result<PageSnapshot> = withContext(Dispatchers.Main) {
-        val wv = webViewRef?.get()
+        val wv = ensureWebViewReady()
             ?: return@withContext fetchLightweightHeadless(getActiveTab().url)
         val snap = extractPageContentInternal(wv)
             ?: return@withContext Result.failure(IllegalStateException("Unable to inspect current WebView DOM"))
@@ -150,8 +170,8 @@ class BrowserController(
     }
 
     suspend fun clickElement(selectorOrText: String): Result<String> = withContext(Dispatchers.Main) {
-        val wv = webViewRef?.get()
-            ?: return@withContext Result.failure(IllegalStateException("Open the Browser screen or Virtual Desktop first."))
+        val wv = ensureWebViewReady()
+            ?: return@withContext Result.failure(IllegalStateException("Live Browser WebView is not currently visible. Ask user or open Command Center Live Screen."))
         val escaped = JSONObject.quote(selectorOrText)
         val js = """
             (function() {
@@ -159,13 +179,13 @@ class BrowserController(
                 let el = null;
                 try { el = document.querySelector(q); } catch(e) {}
                 if (!el) {
-                    const all = Array.from(document.querySelectorAll('a, button, input[type=submit], [role=button]'));
-                    el = all.find(n => (n.innerText || n.value || '').toLowerCase().includes(q.toLowerCase()));
+                    const all = Array.from(document.querySelectorAll('a, button, input[type=submit], input[type=button], [role=button], span, div'));
+                    el = all.find(n => (n.innerText || n.value || n.getAttribute('aria-label') || '').trim().toLowerCase().includes(q.toLowerCase()));
                 }
                 if (!el) return JSON.stringify({ok:false, msg:'Element not found: ' + q});
-                el.scrollIntoView({behavior:'smooth', block:'center'});
+                el.scrollIntoView({behavior:'instant', block:'center'});
                 el.click();
-                return JSON.stringify({ok:true, msg:'Clicked: ' + (el.innerText || el.tagName)});
+                return JSON.stringify({ok:true, msg:'Clicked: ' + (el.innerText || el.value || el.tagName)});
             })();
         """.trimIndent()
         val raw = evalJs(wv, js)
@@ -174,8 +194,8 @@ class BrowserController(
     }
 
     suspend fun fillInput(selectorOrLabel: String, value: String): Result<String> = withContext(Dispatchers.Main) {
-        val wv = webViewRef?.get()
-            ?: return@withContext Result.failure(IllegalStateException("Open the Browser screen or Virtual Desktop first."))
+        val wv = ensureWebViewReady()
+            ?: return@withContext Result.failure(IllegalStateException("Live Browser WebView is not currently visible."))
         val qEsc = JSONObject.quote(selectorOrLabel)
         val vEsc = JSONObject.quote(value)
         val js = """
@@ -190,6 +210,7 @@ class BrowserController(
                 }
                 if (!el) return 'Input field not found: ' + q;
                 if (el.type && el.type.toLowerCase() === 'password') return 'Blocked: Cannot auto-fill password fields.';
+                el.scrollIntoView({behavior:'instant', block:'center'});
                 el.focus();
                 el.value = val;
                 el.dispatchEvent(new Event('input', {bubbles:true}));
@@ -203,12 +224,56 @@ class BrowserController(
     }
 
     suspend fun scrollPage(direction: String): Result<String> = withContext(Dispatchers.Main) {
-        val wv = webViewRef?.get()
+        val wv = ensureWebViewReady()
             ?: return@withContext Result.failure(IllegalStateException("Browser WebView not attached"))
-        val dy = if (direction.lowercase() == "up") -700 else 700
+        val dy = if (direction.lowercase() == "up") -750 else 750
         wv.evaluateJavascript("window.scrollBy({top:$dy, behavior:'smooth'});", null)
         log("Scrolled $direction")
         Result.success("Scrolled browser $direction")
+    }
+
+    suspend fun goBack(): Result<String> = withContext(Dispatchers.Main) {
+        val wv = ensureWebViewReady()
+            ?: return@withContext Result.failure(IllegalStateException("Browser WebView not attached"))
+        if (wv.canGoBack()) {
+            wv.goBack()
+            Result.success("Navigated back in browser")
+        } else {
+            Result.failure(IllegalStateException("Browser has no previous page"))
+        }
+    }
+
+    suspend fun evalCustomJs(script: String): Result<String> = withContext(Dispatchers.Main) {
+        val wv = ensureWebViewReady()
+            ?: return@withContext Result.failure(IllegalStateException("Browser WebView not attached"))
+        val res = evalJs(wv, script) ?: "(null)"
+        Result.success(res.take(4000))
+    }
+
+    suspend fun fastHttpRequest(
+        method: String,
+        url: String,
+        body: String = "",
+        contentType: String = "application/json"
+    ): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanMethod = method.uppercase().ifBlank { "GET" }
+            val builder = Request.Builder()
+                .url(url.trim())
+                .header("User-Agent", "PersonalAIComputer/1.0 Android")
+            when (cleanMethod) {
+                "POST" -> builder.post(body.toRequestBody(contentType.toMediaType()))
+                "PUT" -> builder.put(body.toRequestBody(contentType.toMediaType()))
+                "DELETE" -> builder.delete()
+                else -> builder.get()
+            }
+            httpClient.newCall(builder.build()).execute().use { resp ->
+                val raw = resp.body?.string().orEmpty()
+                auditLogger.log(url.substringAfter("://").substringBefore("/"), "HTTP $cleanMethod", "HTTP ${resp.code}", raw.length.toLong())
+                check(resp.isSuccessful) { "HTTP ${resp.code}: ${raw.take(400)}" }
+                raw.take(5000)
+            }
+        }
     }
 
     suspend fun captureWebViewSnapshot(): Result<String> = withContext(Dispatchers.Main) {
@@ -265,7 +330,7 @@ class BrowserController(
                     .replace(Regex("<[^>]+>"), " ")
                     .replace(Regex("\\s+"), " ")
                     .trim()
-                    .take(6000)
+                    .take(5000)
                 val links = Regex("<a[^>]+href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", RegexOption.IGNORE_CASE)
                     .findAll(html)
                     .take(15)
@@ -276,7 +341,7 @@ class BrowserController(
                     title = title,
                     textContent = cleanText,
                     linksSummary = links,
-                    formsSummary = "(Headless HTTP fetch; open Browser tab for interactive DOM forms)"
+                    formsSummary = "(Headless HTTP fetch; open Live Screen Browser tab for interactive DOM forms)"
                 )
                 _lastExtractedSnapshot.value = snap
                 snap
@@ -289,7 +354,7 @@ class BrowserController(
             (function() {
                 const title = document.title || '';
                 const url = location.href || '';
-                const text = (document.body ? document.body.innerText : '').replace(/\s+/g, ' ').trim().slice(0, 6000);
+                const text = (document.body ? document.body.innerText : '').replace(/\s+/g, ' ').trim().slice(0, 5000);
                 const links = Array.from(document.querySelectorAll('a[href]')).slice(0, 20)
                     .map(a => (a.innerText || 'link').trim().slice(0, 50) + ' -> ' + a.href).join('\n');
                 const forms = Array.from(document.querySelectorAll('input, textarea, select')).slice(0, 15)
@@ -312,7 +377,7 @@ class BrowserController(
     }
 
     private suspend fun evalJs(wv: WebView, js: String): String? {
-        return withTimeoutOrNull(4_000L) {
+        return withTimeoutOrNull(3_500L) {
             suspendCancellableCoroutine { cont ->
                 wv.evaluateJavascript(js) { res ->
                     if (cont.isActive) cont.resume(res)

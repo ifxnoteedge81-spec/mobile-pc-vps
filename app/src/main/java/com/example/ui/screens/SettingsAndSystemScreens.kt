@@ -58,6 +58,7 @@ import com.example.ai.OpenRouterModelInfo
 import com.example.resources.DeviceResourceSnapshot
 import com.example.security.NetworkEvent
 import com.example.security.PermissionLevel
+import com.example.security.SecureKeyStore
 import com.example.security.SecureKeyStore.SecretSlot
 import com.example.storage.AiProviderType
 import com.example.storage.AppSettings
@@ -83,17 +84,16 @@ fun AiModelSettingsScreen(
     lastResolvedModel: String?,
     isFetchingModels: Boolean,
     usageHistory: List<ProviderUsageEntity>,
-    geminiKeyMasked: String,
+    getMaskedSecret: (SecretSlot) -> String,
     openRouterKeyMasked: String,
     youtubeTokenMasked: String,
     onSaveSecret: (SecretSlot, String) -> Unit,
     onDeleteSecret: (SecretSlot) -> Unit,
     onFetchGeminiModels: () -> Unit,
     onFetchOpenRouterModels: () -> Unit,
-    onSaveProviderConfig: (AiProviderType, String, String, Boolean, Boolean, Boolean) -> Unit,
+    onSaveProviderConfig: (AiProviderType, String, String, Boolean, Boolean, Boolean, Boolean) -> Unit,
     onChangeTheme: (ThemeMode) -> Unit
 ) {
-    var geminiKeyInput by remember { mutableStateOf("") }
     var openRouterKeyInput by remember { mutableStateOf("") }
     var ytTokenInput by remember { mutableStateOf("") }
 
@@ -103,6 +103,7 @@ fun AiModelSettingsScreen(
     var streaming by remember(settings.streamingEnabled) { mutableStateOf(settings.streamingEnabled) }
     var autoFallback by remember(settings.autoFallbackEnabled) { mutableStateOf(settings.autoFallbackEnabled) }
     var preferFree by remember(settings.preferFreeModelsOnSimpleTasks) { mutableStateOf(settings.preferFreeModelsOnSimpleTasks) }
+    var fullAutonomous by remember(settings.fullAutonomousMode) { mutableStateOf(settings.fullAutonomousMode) }
     var onlyFreeFilter by remember { mutableStateOf(false) }
 
     LazyColumn(
@@ -120,38 +121,68 @@ fun AiModelSettingsScreen(
             )
         }
 
-        // Gemini Key Card
+        // 5 Rotating Gemini Key Cards (#1 - #5)
         item {
+            val configuredCount = SecureKeyStore.geminiSlots.count { getMaskedSecret(it) != "Not configured" }
             GlassOsCard {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Google Gemini API Key", style = MaterialTheme.typography.titleSmall)
-                    StatusBadge(label = geminiKeyMasked, color = if (geminiKeyMasked == "Not configured") AmberWarning else EmeraldPulse)
+                    Text("Gemini API Key Pool (1–5 Auto-Rotate)", style = MaterialTheme.typography.titleSmall)
+                    StatusBadge(
+                        label = "$configuredCount/5 Active",
+                        color = if (configuredCount == 0) AmberWarning else EmeraldPulse
+                    )
                 }
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = geminiKeyInput,
-                    onValueChange = { geminiKeyInput = it },
-                    placeholder = { Text("Paste AIza... Gemini key") },
-                    visualTransformation = PasswordVisualTransformation(),
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth().testTag("gemini_key_input")
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "৫টি আলাদা জিমেইলের Gemini Key যোগ করলে একটির লিমিট/429 এলে সাথে সাথে পরের Key (#1→#2→#3→#4→#5) রোটেট করবে এবং ৫টিই শেষ হলে অটো OpenRouter-এ সুইচ হবে।",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Spacer(Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = { onSaveSecret(SecretSlot.GEMINI_API_KEY, geminiKeyInput); geminiKeyInput = "" },
-                        modifier = Modifier.testTag("save_gemini_key_button")
-                    ) { Text("Encrypt & Save") }
-                    OutlinedButton(onClick = { onDeleteSecret(SecretSlot.GEMINI_API_KEY) }) { Text("Delete") }
+                Spacer(Modifier.height(10.dp))
+                SecureKeyStore.geminiSlots.forEachIndexed { idx, slot ->
+                    val slotNum = idx + 1
+                    val masked = getMaskedSecret(slot)
+                    var slotInput by remember(slot) { mutableStateOf("") }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Key #$slotNum", style = MaterialTheme.typography.labelLarge)
+                        StatusBadge(
+                            label = masked,
+                            color = if (masked == "Not configured") AmberWarning else EmeraldPulse
+                        )
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    OutlinedTextField(
+                        value = slotInput,
+                        onValueChange = { slotInput = it },
+                        placeholder = { Text("Paste AIza... Gemini Key #$slotNum") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag(if (slotNum == 1) "gemini_key_input" else "gemini_key_input_$slotNum")
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = { onSaveSecret(slot, slotInput); slotInput = "" },
+                            modifier = Modifier.testTag(if (slotNum == 1) "save_gemini_key_button" else "save_gemini_key_button_$slotNum")
+                        ) { Text("Save #$slotNum") }
+                        OutlinedButton(onClick = { onDeleteSecret(slot) }) { Text("Delete") }
+                    }
+                    if (slotNum < 5) Spacer(Modifier.height(12.dp))
                 }
             }
         }
 
-        // OpenRouter Key Card
+        // OpenRouter Key Card (Auto-Fallback after 5 Gemini Keys)
         item {
             GlassOsCard {
                 Row(
@@ -159,9 +190,15 @@ fun AiModelSettingsScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("OpenRouter API Key", style = MaterialTheme.typography.titleSmall)
+                    Text("OpenRouter API Key (Auto Fallback)", style = MaterialTheme.typography.titleSmall)
                     StatusBadge(label = openRouterKeyMasked, color = if (openRouterKeyMasked == "Not configured") AmberWarning else EmeraldPulse)
                 }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "৫টি Gemini Key-র টোকেন/লিমিট শেষ হলে বা ব্যর্থ হলে স্বয়ংক্রিয়ভাবে OpenRouter যুক্ত হয়ে কাজ চালাবে।",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = openRouterKeyInput,
@@ -279,13 +316,14 @@ fun AiModelSettingsScreen(
                     }
                 }
                 Spacer(Modifier.height(10.dp))
+                SwitchRow("Full Autonomous Mode (অটো-কাজ)", fullAutonomous) { fullAutonomous = it }
                 SwitchRow("Response Streaming (SSE)", streaming) { streaming = it }
-                SwitchRow("Automatic Provider Fallback", autoFallback) { autoFallback = it }
-                SwitchRow("Prefer Free/Fast Model for Simple Tasks", preferFree) { preferFree = it }
+                SwitchRow("Automatic Provider Fallback (Gemini -> OR)", autoFallback) { autoFallback = it }
+                SwitchRow("Prioritize Fast Models (Flash)", preferFree) { preferFree = it }
                 Spacer(Modifier.height(10.dp))
                 Button(
                     onClick = {
-                        onSaveProviderConfig(provider, selectedGemini, selectedOpenRouter, streaming, autoFallback, preferFree)
+                        onSaveProviderConfig(provider, selectedGemini, selectedOpenRouter, streaming, autoFallback, preferFree, fullAutonomous)
                     },
                     modifier = Modifier.fillMaxWidth().testTag("save_router_config_button")
                 ) {
@@ -354,16 +392,21 @@ fun ResourceManagerScreen(
     settings: AppSettings,
     resources: DeviceResourceSnapshot,
     presetsMb: List<Int>,
+    storagePresetsMb: List<Int>,
     onRefresh: () -> Unit,
-    onSaveResourceConfig: (Int, Boolean, PowerProfile, Int) -> Unit,
+    onSaveResourceConfig: (Int, Int, Boolean, Boolean, PowerProfile, Int, Boolean) -> Unit,
     onClearDir: (String) -> Unit
 ) {
     var budgetMb by remember(settings.ramBudgetMb) { mutableIntStateOf(settings.ramBudgetMb) }
     var customBudgetInput by remember(settings.ramBudgetMb) { mutableStateOf(settings.ramBudgetMb.toString()) }
+    var storageQuotaMb by remember(settings.storageQuotaMb) { mutableIntStateOf(settings.storageQuotaMb) }
+    var customStorageInput by remember(settings.storageQuotaMb) { mutableStateOf(settings.storageQuotaMb.toString()) }
+    var adaptiveScaling by remember(settings.adaptiveDeviceScaling) { mutableStateOf(settings.adaptiveDeviceScaling) }
     var lowResource by remember(settings.lowResourceMode) { mutableStateOf(settings.lowResourceMode) }
     var powerProfile by remember(settings.powerProfile) { mutableStateOf(settings.powerProfile) }
     var concurrency by remember(settings.maxConcurrency) { mutableFloatStateOf(settings.maxConcurrency.toFloat()) }
     var confirmClearTarget by remember { mutableStateOf<String?>(null) }
+    var showRestartConfirm by remember { mutableStateOf(false) }
 
     LazyColumn(
         modifier = Modifier
@@ -374,8 +417,8 @@ fun ResourceManagerScreen(
     ) {
         item {
             SectionHeader(
-                title = "Virtual Environment Resource Manager",
-                subtitle = "Configures execution concurrency & workload budgets (Android prohibits permanent RAM locking).",
+                title = "RAM & ROM Engine Manager",
+                subtitle = "যেকোনো Android ফোনের ক্ষমতা অনুযায়ী কাস্টম RAM/ROM সেটআপ ও সেভ-রিস্টার্ট করুন।",
                 icon = Icons.Filled.Memory,
                 trailing = {
                     OutlinedButton(onClick = onRefresh) { Text("Refresh") }
@@ -392,16 +435,35 @@ fun ResourceManagerScreen(
         }
 
         item {
-            GlassOsCard {
+            GlassOsCard(borderColor = NeuralCyan.copy(alpha = 0.6f)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Detected Hardware Tier", style = MaterialTheme.typography.titleSmall)
+                    StatusBadge(label = resources.deviceTierLabel, color = EmeraldPulse)
+                }
+                Spacer(Modifier.height(8.dp))
                 TelemetryMeter(
                     label = "Device Physical RAM (${resources.availableRamMb} MB free / ${resources.totalPhysicalRamMb} MB total)",
                     valueText = resources.memoryPressureLabel,
                     progress = resources.usedRamPercent,
                     accentColor = NeuralCyan
                 )
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(8.dp))
+                val romProgress = if (resources.storageQuotaMb > 0) {
+                    (resources.virtualEnvUsedMb.toFloat() / resources.storageQuotaMb.toFloat()).coerceIn(0f, 1f)
+                } else 0f
+                TelemetryMeter(
+                    label = "Workspace ROM Used (${"%.1f".format(resources.virtualEnvUsedMb)} MB / ${resources.storageQuotaMb} MB Quota)",
+                    valueText = "${"%.1f".format(resources.storageFreeGb)} GB Device Free",
+                    progress = romProgress,
+                    accentColor = EmeraldPulse
+                )
+                Spacer(Modifier.height(8.dp))
                 Text(
-                    "App JVM Heap: ${resources.appHeapUsedMb} MB / ${resources.appHeapMaxMb} MB • CPU: ${resources.cpuCores} cores (${resources.cpuLoadNote})",
+                    "Heap: ${resources.appHeapUsedMb}/${resources.appHeapMaxMb} MB • CPU: ${resources.cpuCores} cores (${resources.primaryAbi}) • Adaptive Max Steps: ${resources.recommendedMaxAgentSteps}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -410,7 +472,7 @@ fun ResourceManagerScreen(
 
         item {
             GlassOsCard {
-                Text("Preferred Memory Budget", style = MaterialTheme.typography.titleSmall)
+                Text("Custom RAM Budget (MB)", style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.height(8.dp))
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     items(presetsMb) { mb ->
@@ -432,10 +494,39 @@ fun ResourceManagerScreen(
                         customBudgetInput = it.filter { c -> c.isDigit() }
                         customBudgetInput.toIntOrNull()?.let { v -> budgetMb = v }
                     },
-                    label = { Text("Custom Budget (MB)") },
+                    label = { Text("Custom RAM Budget (MB)") },
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth().testTag("custom_ram_budget_input")
                 )
+
+                Spacer(Modifier.height(12.dp))
+                Text("Custom ROM / Workspace Storage Quota (MB)", style = MaterialTheme.typography.titleSmall)
+                Spacer(Modifier.height(8.dp))
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(storagePresetsMb) { mb ->
+                        val label = if (mb >= 1024) "${mb / 1024} GB" else "$mb MB"
+                        FilterChip(
+                            selected = storageQuotaMb == mb,
+                            onClick = {
+                                storageQuotaMb = mb
+                                customStorageInput = mb.toString()
+                            },
+                            label = { Text(label) }
+                        )
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = customStorageInput,
+                    onValueChange = {
+                        customStorageInput = it.filter { c -> c.isDigit() }
+                        customStorageInput.toIntOrNull()?.let { v -> storageQuotaMb = v }
+                    },
+                    label = { Text("Custom ROM Quota (MB)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("custom_rom_quota_input")
+                )
+
                 Spacer(Modifier.height(10.dp))
                 Text("CPU & Power Mode", style = MaterialTheme.typography.titleSmall)
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -448,9 +539,12 @@ fun ResourceManagerScreen(
                     }
                 }
                 Spacer(Modifier.height(8.dp))
+                SwitchRow("Hardware-Adaptive Auto-Scaling (যেকোনো মোবাইলে অটো অপ্টিমাইজ)", adaptiveScaling) {
+                    adaptiveScaling = it
+                }
                 SwitchRow("Low Resource Mode (reduces steps & concurrency)", lowResource) { lowResource = it }
                 Text(
-                    "Execution Concurrency Limit: ${concurrency.roundToInt()} (Effective under current RAM: ${resources.effectiveConcurrency})",
+                    "Execution Concurrency Limit: ${concurrency.roundToInt()} (Effective: ${resources.effectiveConcurrency} • Max AI Steps: ${resources.recommendedMaxAgentSteps})",
                     style = MaterialTheme.typography.bodySmall
                 )
                 Slider(
@@ -459,11 +553,41 @@ fun ResourceManagerScreen(
                     valueRange = 1f..4f,
                     steps = 2
                 )
-                Button(
-                    onClick = { onSaveResourceConfig(budgetMb, lowResource, powerProfile, concurrency.roundToInt()) },
-                    modifier = Modifier.fillMaxWidth().testTag("save_resource_budget_button")
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "সুরক্ষা গ্যারান্টি: রিস্টার্ট করলে আপনার API Key (#1-#5 + OpenRouter), স্কিল, কোড, CAD ডিজাইন ও চ্যাট মেমোরি ১০০% অক্ষত থাকবে।",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = EmeraldPulse
+                )
+                Spacer(Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text("Apply Resource Configuration")
+                    OutlinedButton(
+                        onClick = {
+                            onSaveResourceConfig(
+                                budgetMb,
+                                storageQuotaMb,
+                                adaptiveScaling,
+                                lowResource,
+                                powerProfile,
+                                concurrency.roundToInt(),
+                                false
+                            )
+                        },
+                        modifier = Modifier.weight(1f).testTag("save_resource_budget_button")
+                    ) {
+                        Text("Apply Live")
+                    }
+                    Button(
+                        onClick = { showRestartConfirm = true },
+                        modifier = Modifier.weight(1.25f).testTag("save_and_restart_resource_button")
+                    ) {
+                        Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Save & Restart")
+                    }
                 }
             }
         }
@@ -496,6 +620,36 @@ fun ResourceManagerScreen(
                 }
             }
         }
+    }
+
+    if (showRestartConfirm) {
+        AlertDialog(
+            onDismissRequest = { showRestartConfirm = false },
+            title = { Text("সেভ করে রিস্টার্ট করবেন?") },
+            text = {
+                Text("নতুন RAM ($budgetMb MB) ও ROM ($storageQuotaMb MB) বাজেট কার্যকর করতে অ্যাপটি নিরাপদভাবে রিস্টার্ট হবে। আপনার কোনো API Key, কোড, CAD ফাইল বা মেমোরি মুছবে না।")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showRestartConfirm = false
+                        onSaveResourceConfig(
+                            budgetMb,
+                            storageQuotaMb,
+                            adaptiveScaling,
+                            lowResource,
+                            powerProfile,
+                            concurrency.roundToInt(),
+                            true
+                        )
+                    },
+                    modifier = Modifier.testTag("confirm_safe_restart_button")
+                ) { Text("হ্যাঁ, রিস্টার্ট করুন") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRestartConfirm = false }) { Text("বাতিল") }
+            }
+        )
     }
 
     confirmClearTarget?.let { target ->

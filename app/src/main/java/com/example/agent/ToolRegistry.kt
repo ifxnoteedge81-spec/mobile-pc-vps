@@ -3,6 +3,8 @@ package com.example.agent
 import com.example.accessibility.DeviceAutomationController
 import com.example.ai.ToolDeclaration
 import com.example.browser.BrowserController
+import com.example.resources.DeviceResourceManager
+import com.example.runtime.CadDrawingEngine
 import com.example.runtime.LocalJsEngine
 import com.example.runtime.LocalLinuxEnvironment
 import com.example.runtime.LocalPythonEngine
@@ -48,77 +50,92 @@ class ToolRegistry(
     private val pythonEngine: LocalPythonEngine,
     private val jsEngine: LocalJsEngine,
     private val webServer: LocalWebServer,
+    private val cadEngine: CadDrawingEngine,
+    private val resourceManager: DeviceResourceManager,
     private val browser: BrowserController,
     private val deviceController: DeviceAutomationController,
-    private val repository: AgentRepository
+    private val repository: AgentRepository,
+    private val skillManager: UniversalSkillManager
 ) {
 
     fun getDeclarations(): List<ToolDeclaration> = listOf(
         ToolDeclaration(
             name = "shell_exec",
-            description = "Execute a POSIX shell command inside the sandboxed Linux virtual_env workspace.",
+            description = "Execute a POSIX shell command inside sandboxed virtual_env workspace.",
             parametersSchema = schema(
-                props = mapOf("command" to prop("string", "Shell command to run, e.g. 'ls -la' or 'grep -rn foo workspace'")),
+                props = mapOf("command" to prop("string", "Shell command, e.g. 'ls -la'")),
                 required = listOf("command")
             )
         ),
         ToolDeclaration(
             name = "python_exec",
-            description = "Execute Python 3 code on-device inside the virtual workspace and capture stdout/stderr.",
+            description = "Execute Python 3 code on-device and capture stdout/stderr.",
             parametersSchema = schema(
-                props = mapOf("code" to prop("string", "Valid Python 3 code to run")),
+                props = mapOf("code" to prop("string", "Python 3 code to run")),
                 required = listOf("code")
             )
         ),
         ToolDeclaration(
             name = "js_exec",
-            description = "Execute JavaScript (or TypeScript) on the Android V8 engine and return console logs.",
+            description = "Execute JavaScript or TypeScript on Android V8 engine.",
             parametersSchema = schema(
                 props = mapOf(
-                    "code" to prop("string", "JavaScript or TypeScript code"),
-                    "typescript" to prop("boolean", "Set true if code uses basic TypeScript types")
+                    "code" to prop("string", "JS or TS code"),
+                    "typescript" to prop("boolean", "True if TypeScript")
                 ),
                 required = listOf("code")
             )
         ),
         ToolDeclaration(
             name = "file_list",
-            description = "List files and directories inside virtual_env (e.g., '', 'workspace', 'uploads', 'scripts', 'projects', 'downloads').",
+            description = "List files in virtual_env ('', 'workspace', 'uploads', 'scripts', 'projects', 'downloads').",
             parametersSchema = schema(
-                props = mapOf("path" to prop("string", "Relative path inside virtual_env")),
+                props = mapOf("path" to prop("string", "Relative directory path")),
                 required = emptyList()
             )
         ),
         ToolDeclaration(
             name = "file_read",
-            description = "Read a text file from virtual_env (including user uploaded files in uploads/).",
+            description = "Read a text file from virtual_env (including uploads/).",
             parametersSchema = schema(
-                props = mapOf("path" to prop("string", "Relative path inside virtual_env")),
+                props = mapOf("path" to prop("string", "Relative file path")),
                 required = listOf("path")
             )
         ),
         ToolDeclaration(
             name = "file_write",
-            description = "Write or update a text file (report, script, CV draft, HTML, JSON) inside virtual_env.",
+            description = "Write or update a text file inside virtual_env.",
             parametersSchema = schema(
                 props = mapOf(
-                    "path" to prop("string", "Relative file path inside virtual_env"),
-                    "content" to prop("string", "Full file contents")
+                    "path" to prop("string", "Relative file path"),
+                    "content" to prop("string", "File text content")
                 ),
                 required = listOf("path", "content")
             )
         ),
         ToolDeclaration(
             name = "file_delete",
-            description = "Delete a file in virtual_env. Requires user Level 2 confirmation.",
+            description = "Delete a file in virtual_env.",
             parametersSchema = schema(
-                props = mapOf("path" to prop("string", "Relative path to delete")),
+                props = mapOf("path" to prop("string", "Relative file path")),
                 required = listOf("path")
             )
         ),
         ToolDeclaration(
+            name = "http_request",
+            description = "Fast direct HTTPS GET/POST/PUT request for APIs, GitHub raw files, JSON, or web pages.",
+            parametersSchema = schema(
+                props = mapOf(
+                    "url" to prop("string", "Full https:// URL"),
+                    "method" to prop("string", "GET, POST, PUT, or DELETE"),
+                    "body" to prop("string", "Optional JSON/text request body")
+                ),
+                required = listOf("url")
+            )
+        ),
+        ToolDeclaration(
             name = "browser_open_and_read",
-            description = "Open a URL or web search query in the integrated browser and extract page title, text, links, and forms.",
+            description = "Open URL or search query in integrated Live WebView Browser and extract text, links, forms.",
             parametersSchema = schema(
                 props = mapOf("url_or_query" to prop("string", "Full https:// URL or search query")),
                 required = listOf("url_or_query")
@@ -126,7 +143,7 @@ class ToolRegistry(
         ),
         ToolDeclaration(
             name = "browser_click",
-            description = "Click a button or link in the integrated browser by CSS selector or visible text.",
+            description = "Click a button or link in integrated Live Browser by CSS selector or text.",
             parametersSchema = schema(
                 props = mapOf("target" to prop("string", "CSS selector or visible button/link text")),
                 required = listOf("target")
@@ -134,21 +151,37 @@ class ToolRegistry(
         ),
         ToolDeclaration(
             name = "browser_fill",
-            description = "Fill a form input field in the integrated browser. Requires Level 2 confirmation.",
+            description = "Fill an input field in integrated Live Browser.",
             parametersSchema = schema(
                 props = mapOf(
-                    "field" to prop("string", "CSS selector, input name, id, or placeholder"),
-                    "value" to prop("string", "Text value to type")
+                    "field" to prop("string", "CSS selector, name, id, or placeholder"),
+                    "value" to prop("string", "Text to type")
                 ),
                 required = listOf("field", "value")
             )
         ),
         ToolDeclaration(
+            name = "browser_scroll",
+            description = "Scroll or navigate back in the integrated Live Browser.",
+            parametersSchema = schema(
+                props = mapOf("direction" to prop("string", "'down', 'up', or 'back'")),
+                required = listOf("direction")
+            )
+        ),
+        ToolDeclaration(
+            name = "browser_eval_js",
+            description = "Run JavaScript inside the integrated Live Browser DOM to inspect or automate complex pages.",
+            parametersSchema = schema(
+                props = mapOf("script" to prop("string", "JavaScript snippet to evaluate")),
+                required = listOf("script")
+            )
+        ),
+        ToolDeclaration(
             name = "browser_download",
-            description = "Download a public file URL into virtual_env/downloads/. Requires Level 2 confirmation.",
+            description = "Download a public file URL into virtual_env/downloads/.",
             parametersSchema = schema(
                 props = mapOf(
-                    "url" to prop("string", "HTTPS URL to download"),
+                    "url" to prop("string", "HTTPS URL"),
                     "filename" to prop("string", "Optional target filename")
                 ),
                 required = listOf("url")
@@ -156,70 +189,107 @@ class ToolRegistry(
         ),
         ToolDeclaration(
             name = "app_list",
-            description = "List launchable Android apps installed on the device so Virtual Hands can open and automate them.",
+            description = "List launchable Android apps installed on the device.",
             parametersSchema = schema(
-                props = mapOf("filter" to prop("string", "Optional keyword filter by app name or package")),
+                props = mapOf("filter" to prop("string", "Optional filter keyword")),
                 required = emptyList()
             )
         ),
         ToolDeclaration(
             name = "app_launch",
-            description = "Launch an installed Android app by display name (e.g., 'Chrome', 'WhatsApp', 'YouTube') or package name using Virtual Hands.",
+            description = "Launch an installed Android app by display name or package ID.",
             parametersSchema = schema(
-                props = mapOf("app_name_or_package" to prop("string", "App name or Android package ID")),
+                props = mapOf("app_name_or_package" to prop("string", "App name or package ID")),
+                required = listOf("app_name_or_package")
+            )
+        ),
+        ToolDeclaration(
+            name = "app_install_store",
+            description = "Open Google Play Store to install a required Android app when it is not yet installed.",
+            parametersSchema = schema(
+                props = mapOf("app_name_or_package" to prop("string", "App name or Play Store package ID")),
                 required = listOf("app_name_or_package")
             )
         ),
         ToolDeclaration(
             name = "device_screen_inspect",
-            description = "Inspect the current Android screen UI hierarchy (text, descriptions, clickable/editable buttons, center coordinates) via Accessibility Virtual Hands.",
-            parametersSchema = schema(props = emptyMap(), required = emptyList())
+            description = "Inspect current Android screen UI elements, coordinates, and screen size via Accessibility Virtual Hands.",
+            parametersSchema = schema(
+                props = mapOf("reason" to prop("string", "Optional brief reason for inspection")),
+                required = emptyList()
+            )
         ),
         ToolDeclaration(
             name = "device_virtual_hand",
-            description = "Perform any Android Accessibility Virtual Hand action on the device screen (tap, double_tap, long_press, swipe, scroll_up, scroll_down, scroll_left, scroll_right, click_text, type, type_focused, launch_app, open_url, back, home, recents, notifications, quick_settings, screenshot, wait_ms). Requires Level 2 confirmation.",
+            description = "Control any Android screen via Virtual Hands: tap, double_tap, long_press, swipe, scroll_up, scroll_down, scroll_left, scroll_right, scroll_to_text, click_text, type, type_focused, press_enter, launch_app, open_url, back, home, recents, notifications, quick_settings, screenshot, wait_ms, wait_and_inspect.",
             parametersSchema = schema(
                 props = mapOf(
-                    "action" to prop("string", "Action: tap, double_tap, long_press, swipe, scroll_up, scroll_down, scroll_left, scroll_right, click_text, type, type_focused, launch_app, open_url, back, home, recents, notifications, quick_settings, screenshot, wait_ms"),
-                    "arg1" to prop("string", "Primary arg: X coordinate, text/viewId query, app name, URL, wait duration ms, or swipe coords"),
-                    "arg2" to prop("string", "Secondary arg: Y coordinate, text to type, or swipe target")
+                    "action" to prop("string", "Action name"),
+                    "arg1" to prop("string", "X coord, text/viewId query, app name, URL, wait ms, or 'x1,y1'"),
+                    "arg2" to prop("string", "Y coord, text to type, or 'x2,y2'")
                 ),
                 required = listOf("action")
             )
         ),
         ToolDeclaration(
-            name = "request_human_intervention",
-            description = "CRITICAL: Call this whenever the agent encounters CAPTCHA, OTP, 2FA, login wall, biometric check, or any step it cannot complete autonomously. Pauses the agent cleanly, pops the Live Screen up inside the Agent Chat Box for the user to solve, and resumes from this exact step once the user taps Resume.",
+            name = "device_clipboard",
+            description = "Read or copy text to the Android clipboard for cross-app pasting.",
             parametersSchema = schema(
                 props = mapOf(
-                    "challenge_type" to prop("string", "e.g., CAPTCHA, OTP, Login Verification, Manual Check"),
-                    "reason" to prop("string", "Short description of why agent paused"),
-                    "target_mode" to prop("string", "'BROWSER' if inside integrated WebView or 'VIRTUAL_HANDS' if inside another Android app"),
-                    "instruction_for_user" to prop("string", "Clear Bangla/English instruction telling the user what to solve before tapping Resume")
+                    "mode" to prop("string", "'get' or 'set'"),
+                    "text" to prop("string", "Text to copy when mode='set'")
+                ),
+                required = listOf("mode")
+            )
+        ),
+        ToolDeclaration(
+            name = "device_intent_action",
+            description = "Open Android Share sheet, Dialer, Email compose, or external URL intent.",
+            parametersSchema = schema(
+                props = mapOf(
+                    "action_type" to prop("string", "'share', 'dial', 'email', or 'url'"),
+                    "target" to prop("string", "Phone number, email, URL, or share subject"),
+                    "body" to prop("string", "Optional text body")
+                ),
+                required = listOf("action_type", "target")
+            )
+        ),
+        ToolDeclaration(
+            name = "request_human_intervention",
+            description = "Pause immediately and open Live Screen inside the Agent Chat Box when CAPTCHA, OTP, 2FA, login wall, or manual verification appears. Resumes from this step when user solves it.",
+            parametersSchema = schema(
+                props = mapOf(
+                    "challenge_type" to prop("string", "e.g. CAPTCHA, OTP, Login Verification"),
+                    "reason" to prop("string", "Short description"),
+                    "target_mode" to prop("string", "'BROWSER' or 'VIRTUAL_HANDS'"),
+                    "instruction_for_user" to prop("string", "Instruction for user before tapping Resume")
                 ),
                 required = listOf("challenge_type", "reason", "target_mode", "instruction_for_user")
             )
         ),
         ToolDeclaration(
             name = "memory_read",
-            description = "Read saved Agent Memory entries (User Profile, Preferences, Instructions, Project Info).",
-            parametersSchema = schema(props = emptyMap(), required = emptyList())
+            description = "Read saved persistent Agent Memory entries.",
+            parametersSchema = schema(
+                props = mapOf("category" to prop("string", "Optional category filter")),
+                required = emptyList()
+            )
         ),
         ToolDeclaration(
             name = "memory_save",
-            description = "Save non-sensitive context or preferences to Agent Memory.",
+            description = "Save important user preferences, workflow context, or facts to permanent Agent Memory.",
             parametersSchema = schema(
                 props = mapOf(
-                    "category" to prop("string", "Category: User Profile, User Preferences, Working Context, Saved Instructions, Project Information"),
-                    "key" to prop("string", "Short title/key"),
-                    "content" to prop("string", "Memory content (no passwords, OTPs, or API keys)")
+                    "category" to prop("string", "User Profile, User Preferences, Working Context, Saved Instructions, Project Information, Task History"),
+                    "key" to prop("string", "Short key/title"),
+                    "content" to prop("string", "Memory content (never save passwords/OTPs/API keys)")
                 ),
                 required = listOf("category", "key", "content")
             )
         ),
         ToolDeclaration(
             name = "local_server_control",
-            description = "Start or stop the local HTTP web server serving virtual_env/projects on 127.0.0.1:8080.",
+            description = "Start or stop local HTTP dev server for virtual_env/projects on 127.0.0.1:8080.",
             parametersSchema = schema(
                 props = mapOf("action" to prop("string", "'start' or 'stop'")),
                 required = listOf("action")
@@ -227,11 +297,11 @@ class ToolRegistry(
         ),
         ToolDeclaration(
             name = "schedule_automation",
-            description = "Register a recurring or one-time local automation task in Automation Manager. Requires Level 2 confirmation.",
+            description = "Create a recurring or one-time background automation rule.",
             parametersSchema = schema(
                 props = mapOf(
-                    "title" to prop("string", "Automation title"),
-                    "prompt" to prop("string", "Task instruction to run"),
+                    "title" to prop("string", "Rule title"),
+                    "prompt" to prop("string", "Task prompt"),
                     "schedule_type" to prop("string", "ONE_TIME, DAILY, WEEKLY, MONTHLY"),
                     "hour" to prop("integer", "Hour 0-23"),
                     "minute" to prop("integer", "Minute 0-59")
@@ -241,34 +311,116 @@ class ToolRegistry(
         ),
         ToolDeclaration(
             name = "youtube_prepare_package",
-            description = "Generate and save a complete YouTube production package (script, outline, title, description, tags, metadata JSON) into projects/youtube/.",
+            description = "Generate and save a YouTube video production package into projects/youtube/.",
             parametersSchema = schema(
                 props = mapOf(
-                    "slug" to prop("string", "Short folder-safe slug"),
+                    "slug" to prop("string", "Folder-safe slug"),
                     "title" to prop("string", "Video title"),
                     "description" to prop("string", "Video description"),
                     "tags" to prop("string", "Comma-separated tags"),
-                    "script" to prop("string", "Full video script and scene outline")
+                    "script" to prop("string", "Video script & scenes")
                 ),
                 required = listOf("slug", "title", "description", "script")
+            )
+        ),
+        ToolDeclaration(
+            name = "skill_import_auto",
+            description = "Auto-import and adapt ANY external skill (Anthropic SKILL.md, OpenClaw, MCP, Gemini, scripts, .zip bundles, GitHub URLs, or huge multi-thousand-word skill docs) into this agent permanently.",
+            parametersSchema = schema(
+                props = mapOf(
+                    "source" to prop("string", "Relative virtual_env path (e.g. uploads/...), GitHub/HTTPS URL, or raw skill text"),
+                    "title_hint" to prop("string", "Optional title for the skill")
+                ),
+                required = listOf("source")
+            )
+        ),
+        ToolDeclaration(
+            name = "skill_list",
+            description = "List all installed built-in skills and auto-imported external skills (with slug, ecosystem, word count, and status).",
+            parametersSchema = schema(
+                props = mapOf("filter" to prop("string", "Optional keyword filter")),
+                required = emptyList()
+            )
+        ),
+        ToolDeclaration(
+            name = "skill_load",
+            description = "Load instructions, auto-adapted tool mappings, bundled files, and relevant sections or paginated chunks of an imported skill (handles massive 10,000+ line skills).",
+            parametersSchema = schema(
+                props = mapOf(
+                    "slug" to prop("string", "Imported skill slug or title"),
+                    "query" to prop("string", "Optional section/topic keyword to jump directly to matching sections"),
+                    "offset" to prop("integer", "Optional character offset for paginated reading of huge skills")
+                ),
+                required = listOf("slug")
+            )
+        ),
+        ToolDeclaration(
+            name = "skill_delete",
+            description = "Remove an imported custom skill by its slug.",
+            parametersSchema = schema(
+                props = mapOf("slug" to prop("string", "Skill slug to delete")),
+                required = listOf("slug")
+            )
+        ),
+        ToolDeclaration(
+            name = "cad_generate_drawing",
+            description = "Generate real AutoCAD ASCII DXF (.dxf), dimensioned SVG Blueprint (.svg), interactive HTML pan/zoom viewer, and optional 3D STL mesh (.stl) from custom geometry JSON entities (line, rect, circle, arc, polyline, text, dimension) or parametric templates (floor_plan_2bhk, mechanical_plate, spur_gear, l_bracket).",
+            parametersSchema = schema(
+                props = mapOf(
+                    "slug" to prop("string", "Folder-safe project slug, e.g. 'house_plan_1'"),
+                    "title" to prop("string", "Engineering drawing title"),
+                    "units" to prop("string", "'mm', 'cm', 'm', 'in', or 'ft'"),
+                    "entities_json" to prop("string", "JSON array of entities: [{type:'rect',x:0,y:0,w:100,h:80,layer:'WALLS'}, {type:'circle',cx:50,cy:40,r:10,layer:'HOLES'}, {type:'dimension',x1:0,y1:0,x2:100,y2:0,offset:-15,label:'100 mm'}, {type:'text',x:10,y:20,text:'ROOM',height:6}, {type:'line',...}, {type:'arc',...}, {type:'polyline',points:[[0,0],[10,10]],closed:true}]"),
+                    "template" to prop("string", "Optional starter template: 'floor_plan', 'mechanical_plate', 'gear', or 'bracket'"),
+                    "extrude_height_3d" to prop("number", "Optional >0 extrusion height to also export 3D .stl mesh")
+                ),
+                required = listOf("slug", "title")
+            )
+        ),
+        ToolDeclaration(
+            name = "workspace_grep",
+            description = "Search text or patterns across all files inside virtual_env/ (projects, scripts, uploads, skills).",
+            parametersSchema = schema(
+                props = mapOf(
+                    "query" to prop("string", "Case-insensitive search keyword or substring"),
+                    "subdir" to prop("string", "Optional relative folder like 'projects' or 'skills'")
+                ),
+                required = listOf("query")
+            )
+        ),
+        ToolDeclaration(
+            name = "system_hardware_status",
+            description = "Inspect live Android device capabilities: physical/free RAM, custom RAM budget, device/workspace ROM storage & quota, CPU cores/ABI, device performance tier, and active API pool.",
+            parametersSchema = schema(
+                props = mapOf("detail" to prop("string", "Optional 'summary' or 'full'")),
+                required = emptyList()
             )
         )
     )
 
-    fun evaluatePermission(toolName: String, args: JSONObject): PendingPermissionRequest? {
-        return when (toolName) {
-            "shell_exec" -> {
-                val cmd = args.optString("command")
-                when (val check = CommandSecurityGuard.validateShellCommand(cmd)) {
-                    is CommandValidationResult.Blocked -> PendingPermissionRequest(
-                        toolName, PermissionLevel.RESTRICTED, check.reason, cmd
-                    )
-                    is CommandValidationResult.RequiresConfirmation -> PendingPermissionRequest(
-                        toolName, PermissionLevel.CONFIRMATION_REQUIRED, check.reason, cmd
-                    )
-                    CommandValidationResult.Allowed -> null
+    fun evaluatePermission(
+        toolName: String,
+        args: JSONObject,
+        fullAutonomousMode: Boolean = true
+    ): PendingPermissionRequest? {
+        if (toolName == "shell_exec") {
+            val cmd = args.optString("command")
+            return when (val check = CommandSecurityGuard.validateShellCommand(cmd)) {
+                is CommandValidationResult.Blocked -> PendingPermissionRequest(
+                    toolName, PermissionLevel.RESTRICTED, check.reason, cmd
+                )
+                is CommandValidationResult.RequiresConfirmation -> {
+                    if (fullAutonomousMode) null
+                    else PendingPermissionRequest(toolName, PermissionLevel.CONFIRMATION_REQUIRED, check.reason, cmd)
                 }
+                CommandValidationResult.Allowed -> null
             }
+        }
+
+        // In Full Autonomous Mode, execute authorized tools directly without blocking popups
+        if (fullAutonomousMode) return null
+
+        return when (toolName) {
             "file_delete" -> PendingPermissionRequest(
                 toolName,
                 PermissionLevel.CONFIRMATION_REQUIRED,
@@ -287,16 +439,16 @@ class ToolRegistry(
                 "Confirm downloading file from ${args.optString("url")}",
                 args.toString(2)
             )
-            "app_launch" -> PendingPermissionRequest(
+            "app_launch", "app_install_store" -> PendingPermissionRequest(
                 toolName,
                 PermissionLevel.CONFIRMATION_REQUIRED,
-                "Confirm opening Android app '${args.optString("app_name_or_package")}' via Virtual Hands",
+                "Confirm opening '${args.optString("app_name_or_package")}'",
                 args.toString(2)
             )
             "device_virtual_hand" -> PendingPermissionRequest(
                 toolName,
                 PermissionLevel.CONFIRMATION_REQUIRED,
-                "Confirm Virtual Hand action '${args.optString("action")}' on Android screen",
+                "Confirm Virtual Hand action '${args.optString("action")}' on screen",
                 args.toString(2)
             )
             "schedule_automation" -> PendingPermissionRequest(
@@ -390,6 +542,13 @@ class ToolRegistry(
                     verified = true
                 )
             }
+            "http_request" -> {
+                val url = args.optString("url")
+                val method = args.optString("method", "GET")
+                val body = args.optString("body", "")
+                val res = browser.fastHttpRequest(method, url, body)
+                ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "HTTP failed" }, verified = true)
+            }
             "browser_open_and_read" -> {
                 val query = args.optString("url_or_query")
                 val res = browser.navigateAndWait(query)
@@ -399,9 +558,9 @@ class ToolRegistry(
                             Title: ${snap.title}
                             URL: ${snap.url}
                             Page Text:
-                            ${snap.textContent.take(3200)}
+                            ${snap.textContent.take(3000)}
                             Links:
-                            ${snap.linksSummary.take(1000)}
+                            ${snap.linksSummary.take(900)}
                             Forms: ${snap.formsSummary}
                         """.trimIndent()
                         val challenge = CommandSecurityGuard.detectHumanChallenge(snap.textContent, snap.url)
@@ -411,7 +570,7 @@ class ToolRegistry(
                                 reason = cReason,
                                 targetMode = "BROWSER",
                                 urlOrPackage = snap.url,
-                                instructionForUser = "উপরের লাইভ ব্রাউজার স্ক্রিনে $cType সল্ভ করে 'সল্ভ সম্পন্ন — কাজ শুরু করো' বাটনে ট্যাপ করুন।"
+                                instructionForUser = "উপরের লাইভ ব্রাউজার স্ক্রিনে $cType সল্ভ করে 'সল্ভ সম্পন্ন' বাটনে ট্যাপ করুন।"
                             )
                         }
                         ToolExecutionOutcome(toolName, true, summary, verified = true, interventionRequest = intervention)
@@ -424,6 +583,7 @@ class ToolRegistry(
             "browser_click" -> {
                 val target = args.optString("target")
                 val res = browser.clickElement(target)
+                delay(350)
                 ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "Click failed" })
             }
             "browser_fill" -> {
@@ -431,6 +591,17 @@ class ToolRegistry(
                 val value = args.optString("value")
                 val res = browser.fillInput(field, value)
                 ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "Fill failed" })
+            }
+            "browser_scroll" -> {
+                val dir = args.optString("direction", "down").lowercase()
+                val res = if (dir == "back") browser.goBack() else browser.scrollPage(dir)
+                delay(300)
+                ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "Browser scroll failed" })
+            }
+            "browser_eval_js" -> {
+                val script = args.optString("script")
+                val res = browser.evalCustomJs(script)
+                ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "JS eval failed" })
             }
             "browser_download" -> {
                 val url = args.optString("url")
@@ -450,40 +621,33 @@ class ToolRegistry(
             "app_launch" -> {
                 val query = args.optString("app_name_or_package")
                 val res = deviceController.launchApp(query)
+                if (res.isSuccess) delay(650)
                 ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "Launch failed" })
             }
-            "device_screen_inspect" -> {
-                val res = deviceController.inspectScreen()
-                res.fold(
-                    onSuccess = { nodes ->
-                        val pkg = deviceController.activePackage.value
-                        val text = if (nodes.isEmpty()) "Active package: $pkg\nNo accessible nodes detected"
-                        else "Active package: $pkg\n" + nodes.joinToString("\n") { n ->
-                            "${n.className} text='${n.text}' desc='${n.contentDesc}' id='${n.viewId}' center=(${n.centerX.toInt()},${n.centerY.toInt()}) clickable=${n.clickable} editable=${n.editable}"
-                        }
-                        val challenge = CommandSecurityGuard.detectHumanChallenge(text, pkg)
-                        val intervention = challenge?.let { (cType, cReason) ->
-                            HumanInterventionRequest(
-                                challengeType = cType,
-                                reason = cReason,
-                                targetMode = "VIRTUAL_HANDS",
-                                urlOrPackage = pkg,
-                                instructionForUser = "$pkg অ্যাপে $cType দেখা গেছে। অ্যাপটি ওপেন করে সল্ভ করুন, তারপর চ্যাট বক্সে Resume দিন।"
-                            )
-                        }
-                        ToolExecutionOutcome(toolName, true, text, verified = true, interventionRequest = intervention)
-                    },
-                    onFailure = { ToolExecutionOutcome(toolName, false, it.message ?: "Accessibility unavailable") }
-                )
+            "app_install_store" -> {
+                val query = args.optString("app_name_or_package")
+                val res = deviceController.openPlayStoreForApp(query)
+                if (res.isSuccess) delay(850)
+                ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "Play Store launch failed" })
             }
+            "device_screen_inspect" -> formatScreenInspectResult(toolName)
             "device_virtual_hand" -> {
                 val action = args.optString("action").lowercase()
                 val arg1 = args.optString("arg1")
                 val arg2 = args.optString("arg2")
                 if (action == "wait_ms") {
-                    val ms = (arg1.toLongOrNull() ?: 1200L).coerceIn(200L, 10_000L)
+                    val ms = (arg1.toLongOrNull() ?: 1000L).coerceIn(150L, 10_000L)
                     delay(ms)
-                    return ToolExecutionOutcome(toolName, true, "Waited ${ms}ms for UI state settlement", verified = true)
+                    return ToolExecutionOutcome(toolName, true, "Waited ${ms}ms", verified = true)
+                }
+                if (action == "wait_and_inspect") {
+                    val ms = (arg1.toLongOrNull() ?: 900L).coerceIn(200L, 8_000L)
+                    delay(ms)
+                    return formatScreenInspectResult(toolName)
+                }
+                if (action == "scroll_to_text") {
+                    val res = deviceController.scrollToText(arg1)
+                    return ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "Not found" })
                 }
                 val res = when (action) {
                     "tap" -> deviceController.tap(arg1.toFloatOrNull() ?: 500f, arg2.toFloatOrNull() ?: 500f)
@@ -505,18 +669,34 @@ class ToolRegistry(
                     "click_text" -> deviceController.clickText(arg1)
                     "type" -> deviceController.typeIntoField(arg1, arg2)
                     "type_focused" -> deviceController.typeIntoField("", arg1.ifBlank { arg2 })
+                    "press_enter" -> deviceController.pressEnter()
                     "launch_app" -> deviceController.launchApp(arg1)
                     "open_url" -> deviceController.openExternalUrl(arg1)
                     "back", "home", "recents", "notifications", "quick_settings", "screenshot" -> deviceController.globalNav(action)
                     else -> Result.failure(IllegalArgumentException("Unsupported action: $action"))
                 }
+                if (res.isSuccess) delay(280)
                 ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "Gesture failed" })
+            }
+            "device_clipboard" -> {
+                val mode = args.optString("mode", "get").lowercase()
+                val res = if (mode == "set") deviceController.setClipboardText(args.optString("text"))
+                else deviceController.getClipboardText()
+                ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "Clipboard error" })
+            }
+            "device_intent_action" -> {
+                val res = deviceController.sendShareOrIntent(
+                    args.optString("action_type"),
+                    args.optString("target"),
+                    args.optString("body")
+                )
+                ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "Intent failed" })
             }
             "request_human_intervention" -> {
                 val cType = args.optString("challenge_type", "Manual Verification")
                 val reason = args.optString("reason", "AI encountered a step requiring user interaction.")
                 val mode = args.optString("target_mode", "BROWSER").uppercase()
-                val instruction = args.optString("instruction_for_user", "লাইভ স্ক্রিনে ধাপটি সম্পন্ন করে Resume দিন।")
+                val instruction = args.optString("instruction_for_user", "লাইভ স্ক্রিনে ধাপটি সম্পন্ন করে 'সল্ভ সম্পন্ন' চাপুন।")
                 val targetRef = if (mode == "BROWSER") browser.getActiveTab().url else deviceController.activePackage.value
                 ToolExecutionOutcome(
                     toolName = toolName,
@@ -533,7 +713,9 @@ class ToolRegistry(
                 )
             }
             "memory_read" -> {
+                val cat = args.optString("category", "").trim()
                 val memories = repository.getMemorySnapshot()
+                    .filter { cat.isBlank() || it.category.equals(cat, ignoreCase = true) }
                 val text = if (memories.isEmpty()) "Agent Memory is currently empty."
                 else memories.joinToString("\n") { "[${it.category}] ${it.memoryKey}: ${it.content}" }
                 ToolExecutionOutcome(toolName, true, text, verified = true)
@@ -580,7 +762,7 @@ class ToolRegistry(
                     .put("title", title)
                     .put("description", desc)
                     .put("tags", tags.split(",").map { it.trim() }.filter { it.isNotEmpty() })
-                    .put("upload_status", "Prepared locally. Connect YouTube OAuth in AI Settings & confirm Level 2 upload before publishing.")
+                    .put("upload_status", "Prepared locally in projects/youtube/$slug/.")
                     .toString(2)
                 workspace.writeTextFile("projects/youtube/$slug/metadata.json", meta)
                 workspace.writeTextFile("projects/youtube/$slug/script.md", "# $title\n\n$script")
@@ -591,8 +773,173 @@ class ToolRegistry(
                     verified = true
                 )
             }
+            "skill_import_auto" -> {
+                val source = args.optString("source")
+                val hint = args.optString("title_hint", "")
+                val res = skillManager.importAuto(source, hint)
+                res.fold(
+                    onSuccess = { sk ->
+                        val summary = buildString {
+                            append("Auto-imported & configured skill '${sk.title}' (slug: ${sk.slug})\n")
+                            append("Detected Ecosystem: ${sk.ecosystem} | Size: ${sk.wordCount} words (${sk.lineCount} lines)\n")
+                            append("Entry Path: ${sk.entryPath}\n")
+                            if (sk.bundledFilesSummary.isNotBlank()) append("Bundled Files: ${sk.bundledFilesSummary}\n")
+                            append("Adapted Tools:\n${sk.toolMappingSummary}")
+                        }
+                        ToolExecutionOutcome(toolName, true, summary, verified = true)
+                    },
+                    onFailure = { err ->
+                        ToolExecutionOutcome(toolName, false, "Skill auto-import failed: ${err.message}", verified = true)
+                    }
+                )
+            }
+            "skill_list" -> {
+                val filter = args.optString("filter", "").trim()
+                val imported = repository.getAllImportedSkillsSnapshot()
+                    .filter { filter.isBlank() || it.title.contains(filter, true) || it.slug.contains(filter, true) || it.ecosystem.contains(filter, true) }
+                val builtIn = AgentSkillRegistry.skills
+                    .filter { filter.isBlank() || it.title.contains(filter, true) || it.subtitle.contains(filter, true) }
+                val out = buildString {
+                    append("=== IMPORTED UNIVERSAL SKILLS (${imported.size}) ===\n")
+                    if (imported.isEmpty()) {
+                        append("(No external skills imported yet. Use skill_import_auto to absorb any skill file, ZIP, or GitHub URL.)\n")
+                    } else {
+                        imported.forEach { sk ->
+                            append("- [${sk.slug}] ${sk.title} (${sk.ecosystem}, ${sk.wordCount}w/${sk.lineCount}L, enabled=${sk.enabled}): ${sk.description}\n")
+                        }
+                    }
+                    append("\n=== BUILT-IN SKILLS (${builtIn.size}) ===\n")
+                    builtIn.forEach { b ->
+                        append("- ${b.title} [${b.category.title}]: ${b.subtitle}\n")
+                    }
+                }
+                ToolExecutionOutcome(toolName, true, out, verified = true)
+            }
+            "skill_load" -> {
+                val slug = args.optString("slug")
+                val query = args.optString("query", "")
+                val offset = args.optInt("offset", 0)
+                val res = skillManager.loadSkillForAgent(slug, query, offset, maxChars = 5500)
+                ToolExecutionOutcome(
+                    toolName,
+                    res.isSuccess,
+                    res.getOrElse { it.message ?: "Failed to load skill '$slug'" },
+                    verified = true
+                )
+            }
+            "skill_delete" -> {
+                val slug = args.optString("slug")
+                val res = skillManager.deleteSkill(slug)
+                ToolExecutionOutcome(
+                    toolName,
+                    res.isSuccess,
+                    res.fold(onSuccess = { "Deleted imported skill '$slug'." }, onFailure = { it.message ?: "Delete failed" }),
+                    verified = true
+                )
+            }
+            "cad_generate_drawing" -> {
+                val slug = args.optString("slug", "cad_project")
+                val title = args.optString("title", "CAD Blueprint")
+                val units = args.optString("units", "mm")
+                val entitiesJson = args.optString("entities_json", "")
+                val template = args.optString("template", "")
+                val extrudeH = args.optDouble("extrude_height_3d", 0.0).let { if (it.isNaN()) 0.0 else it }
+                val res = cadEngine.generateCadProject(
+                    slug = slug,
+                    title = title,
+                    units = units,
+                    entitiesJson = entitiesJson,
+                    template = template,
+                    extrudeHeight3d = extrudeH
+                )
+                res.fold(
+                    onSuccess = { cad ->
+                        val st = if (!webServer.state.value.running) webServer.start(8080) else webServer.state.value
+                        val viewerUrl = "${st.url}/cad/${cad.slug}/${cad.slug}_viewer.html"
+                        val summary = buildString {
+                            append("Generated Real CAD Package '${cad.title}' (${cad.entityCount} entities, ${"%.1f".format(cad.width)} x ${"%.1f".format(cad.height)} ${cad.units})\n")
+                            append("• AutoCAD DXF: ${cad.dxfPath}\n")
+                            append("• Dimensioned SVG Blueprint: ${cad.svgPath}\n")
+                            append("• Interactive CAD Viewer: ${cad.viewerHtmlPath} (Live URL: $viewerUrl)\n")
+                            cad.stlPath?.let { append("• 3D CAD Mesh STL: $it\n") }
+                            append("Tip: You can open $viewerUrl in browser_open_and_read to preview visually on Live Screen, or share ${cad.dxfPath} to AutoCAD/DWG viewer via device_intent_action.")
+                        }
+                        ToolExecutionOutcome(toolName, true, summary, verified = true)
+                    },
+                    onFailure = { err ->
+                        ToolExecutionOutcome(toolName, false, "CAD generation error: ${err.message}", verified = true)
+                    }
+                )
+            }
+            "workspace_grep" -> {
+                val query = args.optString("query").trim()
+                val subdir = args.optString("subdir", "").trim()
+                if (query.isBlank()) {
+                    ToolExecutionOutcome(toolName, false, "Search query cannot be blank.")
+                } else {
+                    val base = workspace.resolveSafe(subdir)
+                    val hits = mutableListOf<String>()
+                    if (base.exists()) {
+                        base.walkTopDown().filter { it.isFile && it.length() < 1_500_000L }.forEach { f ->
+                            if (hits.size >= 40) return@forEach
+                            val rel = workspace.relativePathOf(f)
+                            runCatching {
+                                f.bufferedReader().useLines { lines ->
+                                    lines.forEachIndexed { idx, line ->
+                                        if (hits.size < 40 && line.contains(query, ignoreCase = true)) {
+                                            hits.add("$rel:${idx + 1}: ${line.trim().take(120)}")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    val out = if (hits.isEmpty()) "No matches for '$query' in '${subdir.ifBlank { "virtual_env/" }}'"
+                    else hits.joinToString("\n")
+                    ToolExecutionOutcome(toolName, true, out, verified = true)
+                }
+            }
+            "system_hardware_status" -> {
+                val snap = resourceManager.snapshot.value
+                val out = buildString {
+                    append("Device Tier: ${snap.deviceTierLabel}\n")
+                    append("Physical RAM: ${snap.availableRamMb} MB free / ${snap.totalPhysicalRamMb} MB total (${snap.memoryPressureLabel})\n")
+                    append("App Heap: ${snap.appHeapUsedMb}/${snap.appHeapMaxMb} MB | CPU: ${snap.cpuCores} cores (${snap.primaryAbi})\n")
+                    append("Device Free ROM: ${"%.2f".format(snap.storageFreeGb)} GB / ${"%.2f".format(snap.storageTotalGb)} GB\n")
+                    append("Virtual Env Usage: ${"%.2f".format(snap.virtualEnvUsedMb)} MB / Custom ROM Quota: ${snap.storageQuotaMb} MB\n")
+                    append("Effective Concurrency: ${snap.effectiveConcurrency} | Max Steps Budget: ${snap.recommendedMaxAgentSteps}\n")
+                    append("Accessibility Virtual Hands: ${if (com.example.accessibility.PersonalAiAccessibilityService.isConnected.value) "CONNECTED" else "NOT CONNECTED"}")
+                }
+                ToolExecutionOutcome(toolName, true, out, verified = true)
+            }
             else -> ToolExecutionOutcome(toolName, false, "Unknown tool: $toolName")
         }
+    }
+
+    private fun formatScreenInspectResult(toolName: String): ToolExecutionOutcome {
+        val res = deviceController.inspectScreen()
+        return res.fold(
+            onSuccess = { nodes ->
+                val pkg = deviceController.activePackage.value
+                val size = deviceController.getScreenSizeLabel()
+                val text = if (nodes.isEmpty()) "Screen: $size | Active package: $pkg\nNo accessible nodes detected"
+                else "Screen: $size | Active package: $pkg\n" + nodes.joinToString("\n") { n ->
+                    "${n.className} text='${n.text}' desc='${n.contentDesc}' id='${n.viewId}' center=(${n.centerX.toInt()},${n.centerY.toInt()}) clickable=${n.clickable} editable=${n.editable}"
+                }
+                val challenge = CommandSecurityGuard.detectHumanChallenge(text, pkg)
+                val intervention = challenge?.let { (cType, cReason) ->
+                    HumanInterventionRequest(
+                        challengeType = cType,
+                        reason = cReason,
+                        targetMode = "VIRTUAL_HANDS",
+                        urlOrPackage = pkg,
+                        instructionForUser = "$pkg অ্যাপে $cType দেখা গেছে। 'অ্যাপে যান' চেপে সল্ভ করুন, তারপর 'সল্ভ সম্পন্ন' চাপুন।"
+                    )
+                }
+                ToolExecutionOutcome(toolName, true, text, verified = true, interventionRequest = intervention)
+            },
+            onFailure = { ToolExecutionOutcome(toolName, false, it.message ?: "Accessibility unavailable") }
+        )
     }
 
     private fun schema(props: Map<String, JSONObject>, required: List<String>): JSONObject {

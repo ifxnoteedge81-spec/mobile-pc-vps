@@ -102,3 +102,20 @@ data class ProviderUsageEntity(
     val completionTokens: Int,
     val timestamp: Long = System.currentTimeMillis()
 )
+
+@Entity(tableName = "imported_skills")
+data class ImportedSkillEntity(
+    @PrimaryKey val slug: String,
+    val title: String,
+    val ecosystem: String, // Anthropic, OpenClaw, Gemini, MCP/OpenAI, Script, Universal
+    val description: String,
+    val entryPath: String, // relative to virtual_env e.g. skills/my_skill/SKILL.md
+    val bundledFilesSummary: String = "",
+    val toolMappingSummary: String = "",
+    val tocSummary: String = "",
+    val wordCount: Int = 0,
+    val lineCount: Int = 0,
+    val sourceOrigin: String = "",
+    val enabled: Boolean = true,
+    val importedAt: Long = System.currentTimeMillis()
+)

@@ -1,15 +1,17 @@
 package com.example.storage
 
+import com.example.agent.UniversalSkillManager
 import com.example.security.CommandSecurityGuard
 import kotlinx.coroutines.flow.Flow
 
-class AgentRepository(private val db: AppDatabase) {
+class AgentRepository(private val db: AppDatabase) : UniversalSkillManager.SkillStore {
     private val taskDao = db.agentTaskDao()
     private val logDao = db.executionLogDao()
     private val memoryDao = db.agentMemoryDao()
     private val ruleDao = db.automationRuleDao()
     private val bookmarkDao = db.bookmarkDao()
     private val usageDao = db.providerUsageDao()
+    private val skillDao = db.importedSkillDao()
 
     val tasks: Flow<List<AgentTaskEntity>> = taskDao.observeAllTasks()
     val recentLogs: Flow<List<ExecutionLogEntity>> = logDao.observeRecentLogs()
@@ -17,11 +19,13 @@ class AgentRepository(private val db: AppDatabase) {
     val automationRules: Flow<List<AutomationRuleEntity>> = ruleDao.observeRules()
     val bookmarks: Flow<List<BookmarkEntity>> = bookmarkDao.observeBookmarks()
     val providerUsage: Flow<List<ProviderUsageEntity>> = usageDao.observeUsage()
+    val importedSkills: Flow<List<ImportedSkillEntity>> = skillDao.observeAllSkills()
 
     fun observeTask(taskId: Long): Flow<AgentTaskEntity?> = taskDao.observeTask(taskId)
     fun observeLogsForTask(taskId: Long): Flow<List<ExecutionLogEntity>> = logDao.observeLogsForTask(taskId)
 
     suspend fun getTask(taskId: Long): AgentTaskEntity? = taskDao.getTaskById(taskId)
+    suspend fun getRecentTasksSnapshot(limit: Int = 10): List<AgentTaskEntity> = taskDao.getRecentTasksSnapshot(limit)
 
     suspend fun createTask(title: String, prompt: String, modelUsed: String): Long {
         return taskDao.insertTask(
@@ -108,10 +112,17 @@ class AgentRepository(private val db: AppDatabase) {
         )
     }
 
+    suspend fun getEnabledImportedSkillsSnapshot(): List<ImportedSkillEntity> = skillDao.getEnabledSkillsSnapshot()
+    override suspend fun getAllImportedSkillsSnapshot(): List<ImportedSkillEntity> = skillDao.getAllSkillsSnapshot()
+    override suspend fun getImportedSkillBySlug(slug: String): ImportedSkillEntity? = skillDao.getSkillBySlug(slug)
+    override suspend fun upsertImportedSkill(skill: ImportedSkillEntity) = skillDao.upsertSkill(skill)
+    override suspend fun deleteImportedSkill(slug: String) = skillDao.deleteSkill(slug)
+
     suspend fun clearAllUserData() {
         logDao.clearAllLogs()
         taskDao.clearAllTasks()
         memoryDao.clearAllMemory()
         usageDao.clearUsage()
+        skillDao.clearAllSkills()
     }
 }

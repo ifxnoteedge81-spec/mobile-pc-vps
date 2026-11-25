@@ -84,6 +84,7 @@ fun PersonalAiApp(
     val browserTabs by viewModel.browserTabs.collectAsStateWithLifecycle()
     val activeTabId by viewModel.activeBrowserTabId.collectAsStateWithLifecycle()
     val browserSnapshot by viewModel.browserSnapshot.collectAsStateWithLifecycle()
+    val browserActivitySignal by viewModel.browserActivitySignal.collectAsStateWithLifecycle()
     val bookmarks by viewModel.bookmarks.collectAsStateWithLifecycle()
     val accessibilityConnected by viewModel.accessibilityConnected.collectAsStateWithLifecycle()
     val activeWindowPkg by viewModel.activeWindowPackage.collectAsStateWithLifecycle()
@@ -106,6 +107,7 @@ fun PersonalAiApp(
     val lastResolvedModel by viewModel.lastResolvedModel.collectAsStateWithLifecycle()
     val isFetchingModels by viewModel.isFetchingModels.collectAsStateWithLifecycle()
     val providerUsage by viewModel.providerUsage.collectAsStateWithLifecycle()
+    val importedSkills by viewModel.importedSkills.collectAsStateWithLifecycle()
     val statusBanner by viewModel.statusBanner.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
@@ -264,17 +266,24 @@ fun PersonalAiApp(
                                     agentState = agentState,
                                     activeModelLabel = viewModel.getActiveModelLabel(),
                                     isOnline = viewModel.isOnline(),
-                                    hasAnyApiKey = viewModel.hasSecret(SecretSlot.GEMINI_API_KEY) ||
+                                    hasAnyApiKey = viewModel.hasAnyGeminiKey() ||
                                         viewModel.hasSecret(SecretSlot.OPENROUTER_API_KEY),
                                     pendingAttachments = pendingAttachments,
+                                    importedSkills = importedSkills,
                                     browserController = viewModel.browserController,
                                     browserTabs = browserTabs,
                                     activeTabId = activeTabId,
+                                    browserActivitySignal = browserActivitySignal,
                                     accessibilityConnected = accessibilityConnected,
                                     activeWindowPackage = activeWindowPkg,
                                     liveNodes = liveAccessibilityNodes.ifEmpty { observedNodes },
                                     onAttachFiles = { uris -> viewModel.attachPickedFiles(context, uris) },
                                     onRemoveAttachment = viewModel::removePendingAttachment,
+                                    onAbsorbAttachmentsAsSkills = viewModel::absorbPendingAttachmentsAsSkills,
+                                    onImportSkillFiles = { uris -> viewModel.importSkillFromUris(context, uris) },
+                                    onImportSkillSource = { src -> viewModel.importSkillFromSource(src) },
+                                    onToggleImportedSkill = viewModel::toggleImportedSkill,
+                                    onDeleteImportedSkill = viewModel::deleteImportedSkill,
                                     onSendCommand = viewModel::sendAgentCommand,
                                     onPause = viewModel::pauseAgent,
                                     onResume = viewModel::resumeAgent,
@@ -399,12 +408,12 @@ fun PersonalAiApp(
                                     lastResolvedModel = lastResolvedModel,
                                     isFetchingModels = isFetchingModels,
                                     usageHistory = providerUsage,
-                                    geminiKeyMasked = viewModel.getMaskedSecret(SecretSlot.GEMINI_API_KEY),
+                                    getMaskedSecret = viewModel::getMaskedSecret,
                                     openRouterKeyMasked = viewModel.getMaskedSecret(SecretSlot.OPENROUTER_API_KEY),
                                     youtubeTokenMasked = viewModel.getMaskedSecret(SecretSlot.YOUTUBE_OAUTH_TOKEN),
                                     onSaveSecret = viewModel::saveSecret,
                                     onDeleteSecret = viewModel::deleteSecret,
-                                    onFetchGeminiModels = viewModel::fetchGeminiModels,
+                                    onFetchGeminiModels = { viewModel.fetchGeminiModels() },
                                     onFetchOpenRouterModels = viewModel::fetchOpenRouterModels,
                                     onSaveProviderConfig = viewModel::updateProviderConfig,
                                     onChangeTheme = viewModel::updateThemeMode
@@ -415,6 +424,7 @@ fun PersonalAiApp(
                                     settings = settings,
                                     resources = resources,
                                     presetsMb = viewModel.ramBudgetPresets,
+                                    storagePresetsMb = viewModel.storageQuotaPresets,
                                     onRefresh = viewModel::refreshResources,
                                     onSaveResourceConfig = viewModel::updateResourceConfig,
                                     onClearDir = viewModel::clearStorageDirectory

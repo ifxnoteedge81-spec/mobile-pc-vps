@@ -71,7 +71,7 @@ object CommandSecurityGuard {
         val protectedHints = listOf(
             "bank", "bkash", "nagad", "rocket", "paypal", "wallet",
             "authenticator", "keepass", "1password", "bitwarden", "keyguard",
-            "packageinstaller", "settings"
+            "packageinstaller"
         )
         return protectedHints.any { lower.contains(it) }
     }
@@ -81,14 +81,15 @@ object CommandSecurityGuard {
         val captchaHints = listOf(
             "captcha", "recaptcha", "hcaptcha", "i'm not a robot", "i am not a robot",
             "verify you are human", "checking your browser", "cf-challenge", "turnstile",
-            "ক্যাপচা", "মানুষ কিনা যাচাই"
+            "verify it's you", "security check", "slide to verify",
+            "ক্যাপচা", "মানুষ কিনা যাচাই", "সিকিউরিটি চেক"
         )
         if (captchaHints.any { lower.contains(it) }) {
             return "CAPTCHA" to "CAPTCHA বা মানব-যাচাইকরণ (Human Verification) ধরা পড়েছে।"
         }
         val otpHints = listOf(
             "enter otp", "one-time password", "verification code", "6-digit code",
-            "2-step verification", "two-factor", "resend code", "sms code",
+            "2-step verification", "two-factor", "resend code", "sms code", "enter the code",
             "ওটিপি", "ভেরিফিকেশন কোড"
         )
         if (otpHints.any { lower.contains(it) }) {

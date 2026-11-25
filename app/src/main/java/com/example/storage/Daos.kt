@@ -18,6 +18,9 @@ interface AgentTaskDao {
     @Query("SELECT * FROM agent_tasks WHERE id = :taskId")
     suspend fun getTaskById(taskId: Long): AgentTaskEntity?
 
+    @Query("SELECT * FROM agent_tasks ORDER BY updatedAt DESC LIMIT :limit")
+    suspend fun getRecentTasksSnapshot(limit: Int = 10): List<AgentTaskEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertTask(task: AgentTaskEntity): Long
 
@@ -107,4 +110,28 @@ interface ProviderUsageDao {
 
     @Query("DELETE FROM provider_usage")
     suspend fun clearUsage()
+}
+
+@Dao
+interface ImportedSkillDao {
+    @Query("SELECT * FROM imported_skills ORDER BY importedAt DESC")
+    fun observeAllSkills(): Flow<List<ImportedSkillEntity>>
+
+    @Query("SELECT * FROM imported_skills WHERE enabled = 1 ORDER BY importedAt DESC")
+    suspend fun getEnabledSkillsSnapshot(): List<ImportedSkillEntity>
+
+    @Query("SELECT * FROM imported_skills ORDER BY importedAt DESC")
+    suspend fun getAllSkillsSnapshot(): List<ImportedSkillEntity>
+
+    @Query("SELECT * FROM imported_skills WHERE slug = :slug LIMIT 1")
+    suspend fun getSkillBySlug(slug: String): ImportedSkillEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertSkill(skill: ImportedSkillEntity)
+
+    @Query("DELETE FROM imported_skills WHERE slug = :slug")
+    suspend fun deleteSkill(slug: String)
+
+    @Query("DELETE FROM imported_skills")
+    suspend fun clearAllSkills()
 }

@@ -12,9 +12,10 @@ import androidx.room.RoomDatabase
         AgentMemoryEntity::class,
         AutomationRuleEntity::class,
         BookmarkEntity::class,
-        ProviderUsageEntity::class
+        ProviderUsageEntity::class,
+        ImportedSkillEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -24,6 +25,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun automationRuleDao(): AutomationRuleDao
     abstract fun bookmarkDao(): BookmarkDao
     abstract fun providerUsageDao(): ProviderUsageDao
+    abstract fun importedSkillDao(): ImportedSkillDao
 
     companion object {
         @Volatile

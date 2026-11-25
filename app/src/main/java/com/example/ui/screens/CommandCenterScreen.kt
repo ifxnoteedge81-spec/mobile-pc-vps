@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -39,11 +40,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Launch
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ClearAll
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Monitor
 import androidx.compose.material.icons.filled.PanTool
@@ -70,6 +73,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -98,6 +102,7 @@ import com.example.agent.FeedEntryKind
 import com.example.agent.SkillCategory
 import com.example.browser.BrowserController
 import com.example.browser.BrowserTab
+import com.example.storage.ImportedSkillEntity
 import com.example.ui.components.GlassOsCard
 import com.example.ui.components.StatusBadge
 import com.example.ui.components.formatBytes
@@ -115,14 +120,21 @@ fun CommandCenterScreen(
     isOnline: Boolean,
     hasAnyApiKey: Boolean,
     pendingAttachments: List<AgentUploadedAttachment>,
+    importedSkills: List<ImportedSkillEntity>,
     browserController: BrowserController,
     browserTabs: List<BrowserTab>,
     activeTabId: String,
+    browserActivitySignal: Long,
     accessibilityConnected: Boolean,
     activeWindowPackage: String,
     liveNodes: List<ObservedUiNode>,
     onAttachFiles: (List<Uri>) -> Unit,
     onRemoveAttachment: (String) -> Unit,
+    onAbsorbAttachmentsAsSkills: () -> Unit,
+    onImportSkillFiles: (List<Uri>) -> Unit,
+    onImportSkillSource: (String) -> Unit,
+    onToggleImportedSkill: (String, Boolean) -> Unit,
+    onDeleteImportedSkill: (String) -> Unit,
     onSendCommand: (String) -> Unit,
     onPause: () -> Unit,
     onResume: () -> Unit,
@@ -143,7 +155,9 @@ fun CommandCenterScreen(
     var showLiveScreen by remember { mutableStateOf(false) }
     var liveScreenMode by remember { mutableStateOf("BROWSER") } // "BROWSER" or "VIRTUAL_HANDS"
     var showSkillsSheet by remember { mutableStateOf(false) }
+    var showImportedOnly by remember { mutableStateOf(false) }
     var selectedSkillCategory by remember { mutableStateOf<SkillCategory?>(null) }
+    var skillImportInput by remember { mutableStateOf("") }
     var interventionNote by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
 
@@ -155,12 +169,26 @@ fun CommandCenterScreen(
             interventionNote = ""
         }
     }
+    LaunchedEffect(browserActivitySignal) {
+        if (browserActivitySignal > 0L) {
+            showLiveScreen = true
+            liveScreenMode = "BROWSER"
+        }
+    }
 
     val filePickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
         if (uris.isNotEmpty()) {
             onAttachFiles(uris)
+        }
+    }
+
+    val skillFilePickerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            onImportSkillFiles(uris)
         }
     }
 
@@ -288,7 +316,12 @@ fun CommandCenterScreen(
                 AssistChip(
                     onClick = { showSkillsSheet = true },
                     leadingIcon = { Icon(Icons.Filled.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp)) },
-                    label = { Text("Skills & Virtual Hands") },
+                    label = {
+                        Text(
+                            if (importedSkills.isEmpty()) "Skills & Auto-Import"
+                            else "Skills (${importedSkills.size} Auto)"
+                        )
+                    },
                     modifier = Modifier.testTag("open_skills_sheet_chip")
                 )
             }
@@ -482,12 +515,21 @@ fun CommandCenterScreen(
             )
         }
 
-        // Attached Uploaded Files Preview Row above Composer
+        // Attached Uploaded Files Preview Row above Composer (+ 1-tap Auto-Skill Absorb)
         if (pendingAttachments.isNotEmpty()) {
             LazyRow(
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
+                item(key = "absorb_skill_chip") {
+                    AssistChip(
+                        onClick = onAbsorbAttachmentsAsSkills,
+                        leadingIcon = { Icon(Icons.Filled.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp), tint = EmeraldPulse) },
+                        label = { Text("অটো-স্কিল যুক্ত করুন") },
+                        modifier = Modifier.testTag("absorb_attachments_skill_chip")
+                    )
+                }
                 items(pendingAttachments, key = { it.id }) { att ->
                     InputChip(
                         selected = true,
@@ -578,44 +620,197 @@ fun CommandCenterScreen(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .padding(horizontal = 16.dp, vertical = 6.dp)
             ) {
                 Text(
-                    "Agent Skills & Virtual Hands",
+                    "Universal Auto-Skill Adapter & Virtual Hands",
                     style = MaterialTheme.typography.titleMedium,
                     color = NeuralCyan
                 )
                 Text(
-                    "যেকোনো স্কিল সিলেক্ট করলে এজেন্ট বক্সে কমান্ড তৈরি হয়ে যাবে (আপলোড করা ফাইলসহ ব্যবহার করা যাবে)।",
+                    "Anthropic, OpenClaw, MCP, Gemini বা যেকোনো এজেন্টের ১০,০০০+ লাইনের স্কিল (.md/.zip/GitHub/Text) দিন — অটো কনফিগার হয়ে এজেন্টে যুক্ত হবে।",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                Spacer(Modifier.height(8.dp))
+
+                // Universal Auto-Importer Card
+                GlassOsCard(borderColor = NeuralCyan.copy(alpha = 0.55f)) {
+                    OutlinedTextField(
+                        value = skillImportInput,
+                        onValueChange = { skillImportInput = it },
+                        placeholder = { Text("GitHub URL, ZIP URL বা বিশাল স্কিল টেক্সট পেস্ট করুন...") },
+                        maxLines = 3,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("skill_import_source_input")
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(
+                            onClick = { skillFilePickerLauncher.launch(arrayOf("*/*")) },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("import_skill_file_button")
+                        ) {
+                            Icon(Icons.Filled.AttachFile, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("File / ZIP পিক")
+                        }
+                        Button(
+                            onClick = {
+                                if (skillImportInput.isNotBlank()) {
+                                    onImportSkillSource(skillImportInput)
+                                    skillImportInput = ""
+                                }
+                            },
+                            enabled = skillImportInput.isNotBlank(),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("import_skill_source_button")
+                        ) {
+                            Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("অটো ইম্পোর্ট")
+                        }
+                    }
+                }
+
                 Spacer(Modifier.height(10.dp))
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     item {
                         FilterChip(
-                            selected = selectedSkillCategory == null,
-                            onClick = { selectedSkillCategory = null },
+                            selected = !showImportedOnly && selectedSkillCategory == null,
+                            onClick = {
+                                showImportedOnly = false
+                                selectedSkillCategory = null
+                            },
                             label = { Text("All") }
+                        )
+                    }
+                    item {
+                        FilterChip(
+                            selected = showImportedOnly,
+                            onClick = {
+                                showImportedOnly = true
+                                selectedSkillCategory = null
+                            },
+                            label = { Text("Auto-Imported (${importedSkills.size})") },
+                            modifier = Modifier.testTag("filter_imported_skills_chip")
                         )
                     }
                     items(SkillCategory.entries) { cat ->
                         FilterChip(
-                            selected = selectedSkillCategory == cat,
-                            onClick = { selectedSkillCategory = cat },
+                            selected = !showImportedOnly && selectedSkillCategory == cat,
+                            onClick = {
+                                showImportedOnly = false
+                                selectedSkillCategory = cat
+                            },
                             label = { Text(cat.title) }
                         )
                     }
                 }
                 Spacer(Modifier.height(10.dp))
-                val filteredSkills = AgentSkillRegistry.skills.filter {
+
+                val filteredBuiltIn = if (showImportedOnly) emptyList()
+                else AgentSkillRegistry.skills.filter {
                     selectedSkillCategory == null || it.category == selectedSkillCategory
                 }
+                val visibleImported = if (showImportedOnly || selectedSkillCategory == null) importedSkills else emptyList()
+
                 LazyColumn(
-                    modifier = Modifier.height(340.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 180.dp, max = 330.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(filteredSkills, key = { it.id }) { skill ->
+                    if (visibleImported.isNotEmpty()) {
+                        items(visibleImported, key = { "imp_${it.slug}" }) { imp ->
+                            GlassOsCard(
+                                borderColor = if (imp.enabled) NeuralCyan.copy(alpha = 0.65f)
+                                else MaterialTheme.colorScheme.outline.copy(alpha = 0.4f),
+                                modifier = Modifier.testTag("imported_skill_card_${imp.slug}")
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Text(
+                                                text = imp.title,
+                                                style = MaterialTheme.typography.titleSmall,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f, fill = false)
+                                            )
+                                            StatusBadge(label = imp.ecosystem, color = VioletAccent)
+                                        }
+                                        Text(
+                                            text = "${imp.wordCount} words • ${imp.lineCount} lines • ${imp.description}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    Spacer(Modifier.width(6.dp))
+                                    Switch(
+                                        checked = imp.enabled,
+                                        onCheckedChange = { onToggleImportedSkill(imp.slug, it) }
+                                    )
+                                }
+                                Spacer(Modifier.height(6.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.End,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    IconButton(
+                                        onClick = { onDeleteImportedSkill(imp.slug) },
+                                        modifier = Modifier.size(36.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Filled.Delete,
+                                            contentDescription = "Delete imported skill",
+                                            tint = CoralAlert
+                                        )
+                                    }
+                                    Spacer(Modifier.width(6.dp))
+                                    Button(
+                                        onClick = {
+                                            inputText = "Use imported skill '${imp.slug}' (${imp.title}): "
+                                            showSkillsSheet = false
+                                        }
+                                    ) {
+                                        Text("Use")
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (showImportedOnly && visibleImported.isEmpty()) {
+                        item {
+                            GlassOsCard {
+                                Text(
+                                    "এখনো কোনো এক্সটার্নাল স্কিল ইম্পোর্ট করা হয়নি। উপরে File/ZIP পিক করুন অথবা GitHub/Skill টেক্সট দিন — যেকোনো এজেন্টের স্কিল অটোমেটিক কনফিগার হয়ে যাবে।",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+
+                    items(filteredBuiltIn, key = { it.id }) { skill ->
                         GlassOsCard(
                             borderColor = if (skill.category == SkillCategory.VIRTUAL_HANDS) EmeraldPulse.copy(alpha = 0.6f)
                             else MaterialTheme.colorScheme.outline,
@@ -647,7 +842,7 @@ fun CommandCenterScreen(
                         }
                     }
                 }
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(14.dp))
             }
         }
     }

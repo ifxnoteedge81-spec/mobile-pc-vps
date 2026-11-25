@@ -18,20 +18,20 @@ class GeminiProvider(
     private val auditLogger: NetworkAuditLogger
 ) {
     private val client = OkHttpClient.Builder()
-        .connectTimeout(25, TimeUnit.SECONDS)
-        .readTimeout(90, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
+        .connectTimeout(12, TimeUnit.SECONDS)
+        .readTimeout(45, TimeUnit.SECONDS)
+        .writeTimeout(20, TimeUnit.SECONDS)
         .build()
 
     @Volatile
-    private var cachedKeyHash: Int = 0
+    private var cachedModelsFetchedAt: Long = 0L
     @Volatile
     private var cachedDiscoveredModels: List<GeminiModelInfo> = emptyList()
 
     suspend fun fetchAvailableModels(apiKey: String, forceRefresh: Boolean = false): Result<List<GeminiModelInfo>> =
         withContext(Dispatchers.IO) {
-            val hash = apiKey.hashCode()
-            if (!forceRefresh && cachedKeyHash == hash && cachedDiscoveredModels.isNotEmpty()) {
+            val freshCache = System.currentTimeMillis() - cachedModelsFetchedAt < 10 * 60_000L
+            if (!forceRefresh && freshCache && cachedDiscoveredModels.isNotEmpty()) {
                 return@withContext Result.success(cachedDiscoveredModels)
             }
             runCatching {
@@ -55,20 +55,26 @@ class GeminiProvider(
                         val supportsGen = (0 until methods.length()).any { methods.optString(it) == "generateContent" }
                         if (!supportsGen) continue
                         val lower = id.lowercase()
-                        if (lower.contains("embedding") ||
+                        // Exclude non-tool-capable or media/embedding models (e.g. gemma, learnlm, imagen, tts, thinking-exp)
+                        if (!lower.startsWith("gemini-") ||
+                            lower.contains("embedding") ||
                             lower.contains("imagen") ||
                             lower.contains("veo") ||
                             lower.contains("tts") ||
                             lower.contains("audio") ||
+                            lower.contains("image") ||
+                            lower.contains("live") ||
+                            lower.contains("thinking") ||
                             lower.contains("robotics") ||
+                            lower.contains("computer-use") ||
                             lower.contains("aqa")
                         ) continue
                         val displayName = obj.optString("displayName", id)
                         val inputLimit = obj.optInt("inputTokenLimit", 32768)
                         list.add(GeminiModelInfo(id = id, displayName = displayName, inputTokenLimit = inputLimit))
                     }
-                    val sorted = list.sortedByDescending { scoreGeminiModel(it.id, TaskComplexity.MULTISTEP_AGENT, false) }
-                    cachedKeyHash = hash
+                    val sorted = list.sortedByDescending { scoreGeminiModel(it.id, TaskComplexity.MULTISTEP_AGENT, true) }
+                    cachedModelsFetchedAt = System.currentTimeMillis()
                     cachedDiscoveredModels = sorted
                     sorted
                 }
@@ -97,7 +103,6 @@ class GeminiProvider(
     private fun scoreGeminiModel(id: String, complexity: TaskComplexity, preferFast: Boolean): Int {
         val lower = id.lowercase()
         var score = 0
-        // Extract version hint dynamically (e.g., 2.5 -> 250, 2.0 -> 200, 3.0 -> 300)
         val verMatch = Regex("""(\d+)\.(\d+)""").find(lower)
         if (verMatch != null) {
             val major = verMatch.groupValues[1].toIntOrNull() ?: 1
@@ -110,23 +115,24 @@ class GeminiProvider(
         val isLatestAlias = lower.endsWith("-latest")
         val isExperimental = lower.contains("exp") || lower.contains("preview")
 
+        // Prioritize fast Flash models for agentic loops so answers don't stall on slow Pro thinking models
         score += when (complexity) {
-            TaskComplexity.SIMPLE -> when {
-                preferFast && isFlash && !isLite -> 400
-                preferFast && isLite -> 360
-                isFlash -> 350
-                else -> 200
-            }
-            TaskComplexity.CODING, TaskComplexity.REASONING, TaskComplexity.MULTISTEP_AGENT -> when {
-                preferFast && isFlash -> 380
+            TaskComplexity.REASONING -> when {
+                !preferFast && isPro -> 600
+                isFlash && !isLite -> 560
                 isPro -> 420
-                isFlash && !isLite -> 360
+                else -> 250
+            }
+            TaskComplexity.SIMPLE, TaskComplexity.CODING, TaskComplexity.MULTISTEP_AGENT -> when {
+                isFlash && !isLite -> 650
+                isFlash && isLite -> 480
+                isPro -> 340
                 else -> 220
             }
         }
         if (isLatestAlias) score += 80
-        if (!isExperimental) score += 40
-        if (lower.contains("deprecated")) score -= 2000
+        if (!isExperimental) score += 120
+        if (lower.contains("deprecated")) score -= 3000
         return score
     }
 
@@ -158,23 +164,24 @@ class GeminiProvider(
 
                 client.newCall(request).execute().use { response ->
                     val code = response.code
-                    if (code == 429 || code >= 500) {
+                    // Fast failover on 429/400/401/403/404 so AiModelRouter rotates immediately to next API key
+                    if (code == 429 || (code in 400..499)) {
+                        val errBody = response.body?.string().orEmpty()
+                        auditLogger.log("generativelanguage.googleapis.com", "Gemini ($model)", "HTTP $code")
+                        return@withContext Result.failure(
+                            IllegalStateException("Gemini API error ($code): ${extractError(errBody)}")
+                        )
+                    }
+
+                    if (code >= 500) {
                         val errBody = response.body?.string().orEmpty()
                         lastError = IllegalStateException("Gemini HTTP $code: ${extractError(errBody)}")
                         if (attempt == 0) {
-                            delay(1000)
+                            delay(300)
                             return@use
                         }
                         auditLogger.log("generativelanguage.googleapis.com", "Gemini ($model)", "HTTP $code")
                         return@withContext Result.failure(lastError!!)
-                    }
-
-                    if (!response.isSuccessful) {
-                        val errBody = response.body?.string().orEmpty()
-                        auditLogger.log("generativelanguage.googleapis.com", "Gemini ($model)", "Error $code")
-                        return@withContext Result.failure(
-                            IllegalStateException("Gemini API error ($code): ${extractError(errBody)}")
-                        )
                     }
 
                     val result = if (stream && tools.isEmpty()) {
@@ -188,7 +195,7 @@ class GeminiProvider(
                 }
             } catch (e: Exception) {
                 lastError = e
-                if (attempt == 0) delay(800)
+                if (attempt == 0) delay(300)
             }
         }
         auditLogger.log("generativelanguage.googleapis.com", "Gemini ($model)", "Failed: ${lastError?.message}")
@@ -201,50 +208,61 @@ class GeminiProvider(
         tools: List<ToolDeclaration>
     ): JSONObject {
         val contents = JSONArray()
-        for (msg in messages) {
+        var idx = 0
+        while (idx < messages.size) {
+            val msg = messages[idx]
             when (msg.role) {
                 "user" -> {
-                    contents.put(
-                        JSONObject().put("role", "user").put(
-                            "parts",
-                            JSONArray().put(JSONObject().put("text", msg.content))
-                        )
-                    )
+                    val userParts = JSONArray().put(JSONObject().put("text", msg.content))
+                    contents.put(JSONObject().put("role", "user").put("parts", userParts))
+                    idx++
                 }
                 "assistant" -> {
-                    val parts = JSONArray()
-                    if (msg.content.isNotBlank()) parts.put(JSONObject().put("text", msg.content))
-                    msg.toolCalls.forEach { call ->
-                        parts.put(
-                            JSONObject().put(
+                    // Preserve exact model parts (including thoughtSignature for Gemini 2.5/3.0+) if available
+                    val parts = if (!msg.rawAssistantPartsJson.isNullOrBlank()) {
+                        runCatching { JSONArray(msg.rawAssistantPartsJson) }.getOrNull()
+                    } else null
+
+                    val finalParts = parts ?: JSONArray().apply {
+                        if (msg.content.isNotBlank()) put(JSONObject().put("text", msg.content))
+                        msg.toolCalls.forEach { call ->
+                            val fcPart = JSONObject().put(
                                 "functionCall",
                                 JSONObject()
                                     .put("name", call.name)
                                     .put("args", call.arguments)
                             )
-                        )
+                            if (!call.thoughtSignature.isNullOrBlank()) {
+                                fcPart.put("thoughtSignature", call.thoughtSignature)
+                            }
+                            put(fcPart)
+                        }
                     }
-                    if (parts.length() > 0) {
-                        contents.put(JSONObject().put("role", "model").put("parts", parts))
+                    if (finalParts.length() > 0) {
+                        contents.put(JSONObject().put("role", "model").put("parts", finalParts))
                     }
+                    idx++
                 }
                 "tool" -> {
-                    val fnName = msg.toolName ?: "tool"
-                    val respObj = JSONObject().put("output", msg.content)
-                    contents.put(
-                        JSONObject().put("role", "user").put(
-                            "parts",
-                            JSONArray().put(
-                                JSONObject().put(
-                                    "functionResponse",
-                                    JSONObject()
-                                        .put("name", fnName)
-                                        .put("response", respObj)
-                                )
+                    // Group ALL consecutive tool responses into a single 'user' turn per Gemini API spec
+                    val toolParts = JSONArray()
+                    while (idx < messages.size && messages[idx].role == "tool") {
+                        val tMsg = messages[idx]
+                        val fnName = tMsg.toolName ?: "tool"
+                        val respObj = JSONObject().put("output", tMsg.content)
+                        toolParts.put(
+                            JSONObject().put(
+                                "functionResponse",
+                                JSONObject()
+                                    .put("name", fnName)
+                                    .put("response", respObj)
                             )
                         )
-                    )
+                        idx++
+                    }
+                    contents.put(JSONObject().put("role", "user").put("parts", toolParts))
                 }
+                else -> idx++
             }
         }
 
@@ -258,12 +276,15 @@ class GeminiProvider(
         if (tools.isNotEmpty()) {
             val decls = JSONArray()
             tools.forEach { tool ->
-                decls.put(
-                    JSONObject()
-                        .put("name", tool.name)
-                        .put("description", tool.description)
-                        .put("parameters", tool.parametersSchema)
-                )
+                val fnObj = JSONObject()
+                    .put("name", tool.name)
+                    .put("description", tool.description)
+                // Omit empty parameters object (Gemini v1beta rejects empty object schemas)
+                val props = tool.parametersSchema.optJSONObject("properties")
+                if (props != null && props.length() > 0) {
+                    fnObj.put("parameters", tool.parametersSchema)
+                }
+                decls.put(fnObj)
             }
             root.put("tools", JSONArray().put(JSONObject().put("functionDeclarations", decls)))
         }
@@ -281,14 +302,21 @@ class GeminiProvider(
         if (parts != null) {
             for (i in 0 until parts.length()) {
                 val p = parts.optJSONObject(i) ?: continue
-                if (p.has("text")) textSb.append(p.optString("text"))
+                if (p.optBoolean("thought", false)) continue
+                if (p.has("text") && !p.isNull("text")) {
+                    textSb.append(p.optString("text"))
+                }
                 if (p.has("functionCall")) {
-                    val fc = p.getJSONObject("functionCall")
+                    val fc = p.optJSONObject("functionCall") ?: continue
+                    val fnName = fc.optString("name").trim()
+                    if (fnName.isBlank()) continue
+                    val thoughtSig = if (!p.isNull("thoughtSignature")) p.optString("thoughtSignature").takeIf { it.isNotBlank() } else null
                     toolCalls.add(
                         ToolCallRequest(
                             id = "gemini_call_${System.nanoTime()}_$i",
-                            name = fc.getString("name"),
-                            arguments = fc.optJSONObject("args") ?: JSONObject()
+                            name = fnName,
+                            arguments = fc.optJSONObject("args") ?: JSONObject(),
+                            thoughtSignature = thoughtSig
                         )
                     )
                 }
@@ -305,7 +333,8 @@ class GeminiProvider(
             text = textSb.toString().trim(),
             toolCalls = toolCalls,
             promptTokens = promptTokens,
-            completionTokens = completionTokens
+            completionTokens = completionTokens,
+            rawAssistantPartsJson = parts?.toString()
         )
     }
 
@@ -325,16 +354,20 @@ class GeminiProvider(
                     if (payload.isNotEmpty() && payload != "[DONE]") {
                         runCatching {
                             val obj = JSONObject(payload)
-                            val chunkText = obj.optJSONArray("candidates")
+                            val partsArr = obj.optJSONArray("candidates")
                                 ?.optJSONObject(0)
                                 ?.optJSONObject("content")
                                 ?.optJSONArray("parts")
-                                ?.optJSONObject(0)
-                                ?.optString("text")
-                                .orEmpty()
-                            if (chunkText.isNotEmpty()) {
-                                textSb.append(chunkText)
-                                onStreamChunk(chunkText)
+                            if (partsArr != null) {
+                                for (i in 0 until partsArr.length()) {
+                                    val p = partsArr.optJSONObject(i) ?: continue
+                                    if (p.optBoolean("thought", false)) continue
+                                    val chunkText = if (!p.isNull("text")) p.optString("text") else ""
+                                    if (chunkText.isNotEmpty()) {
+                                        textSb.append(chunkText)
+                                        onStreamChunk(chunkText)
+                                    }
+                                }
                             }
                             val usage = obj.optJSONObject("usageMetadata")
                             if (usage != null) {
@@ -359,7 +392,7 @@ class GeminiProvider(
 
     private fun extractError(raw: String): String {
         return runCatching {
-            JSONObject(raw).optJSONObject("error")?.optString("message").orEmpty().ifBlank { raw.take(180) }
-        }.getOrElse { raw.take(180) }
+            JSONObject(raw).optJSONObject("error")?.optString("message").orEmpty().ifBlank { raw.take(200) }
+        }.getOrElse { raw.take(200) }
     }
 }

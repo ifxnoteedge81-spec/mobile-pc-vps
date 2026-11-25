@@ -1,10 +1,11 @@
 package com.example.agent
 
 enum class SkillCategory(val title: String) {
+    CAD_DESIGN("AutoCAD & 3D Design"),
     VIRTUAL_HANDS("Virtual Hands"),
     BROWSER_WEB("Browser & Web"),
     FILES_DOCS("Files & Uploads"),
-    CODE_DEV("Python / JS / Server"),
+    CODE_DEV("Python / JS / API"),
     AUTOMATION("Automation")
 }
 
@@ -28,11 +29,39 @@ data class AgentUploadedAttachment(
 object AgentSkillRegistry {
     val skills: List<AgentSkill> = listOf(
         AgentSkill(
+            id = "cad_floor_plan",
+            title = "AutoCAD 2D ফ্লোর প্ল্যান ও ব্লুপ্রিন্ট",
+            subtitle = "আসল DXF + Dimensioned SVG + Interactive Browser প্রিভিউ তৈরি",
+            category = SkillCategory.CAD_DESIGN,
+            promptTemplate = "cad_generate_drawing ব্যবহার করে নিচের মাপ ও রুম অনুযায়ী একটি সম্পূর্ণ AutoCAD (.dxf) ফ্লোর প্ল্যান, ডাইমেনশনসহ SVG ব্লুপ্রিন্ট ও লাইভ ব্রাউজার ভিউয়ার তৈরি করে প্রিভিউ দেখাও: "
+        ),
+        AgentSkill(
+            id = "cad_mech_3d",
+            title = "মেকানিক্যাল পার্টস (2D DXF + 3D STL)",
+            subtitle = "ইঞ্জিনিয়ারিং পার্টস, গিয়ার বা ব্র্যাকেটের 2D CAD ও 3D STL মডেল",
+            category = SkillCategory.CAD_DESIGN,
+            promptTemplate = "cad_generate_drawing ব্যবহার করে সঠিক মাপ, হোল/সার্কেল, ডাইমেনশন এবং extrude_height_3d সহ একটি ইঞ্জিনিয়ারিং 2D DXF + 3D STL মডেল তৈরি করো: "
+        ),
+        AgentSkill(
+            id = "super_autonomous_solver",
+            title = "সুপার অটোনমাস টাস্ক সলভার (No Limits)",
+            subtitle = "জটিল রিসার্চ, কোডিং, অটোমেশন ও সেলফ-ভেরিফিকেশন মোড",
+            category = SkillCategory.AUTOMATION,
+            promptTemplate = "তোমার সব টুল (Python, Shell, Browser, CAD, Virtual Hands, Universal Skills) ব্যবহার করে ধাপে ধাপে পরিকল্পনা করে, ফলাফল যাচাই করে নিচের জটিল কাজটি সম্পূর্ণ শেষ করো: "
+        ),
+        AgentSkill(
             id = "vh_app_control",
             title = "যেকোনো অ্যাপ চালান (Virtual Hands)",
-            subtitle = "অ্যাপ লঞ্চ করে বাটন ক্লিক, স্ক্রল ও টাইপ করা",
+            subtitle = "অ্যাপ লঞ্চ করে বাটন ক্লিক, স্ক্রল, টাইপ ও সম্পূর্ণ কাজ শেষ করা",
             category = SkillCategory.VIRTUAL_HANDS,
-            promptTemplate = "Virtual Hands ব্যবহার করে ফোনের ইনস্টল করা অ্যাপের তালিকা দেখো, তারপর প্রয়োজনীয় অ্যাপ ওপেন করে স্ক্রিন দেখে ধাপে ধাপে কাজটি সম্পন্ন করো: "
+            promptTemplate = "Virtual Hands ব্যবহার করে ফোনের ইনস্টল করা অ্যাপের তালিকা দেখো, প্রয়োজনীয় অ্যাপ ওপেন করে স্ক্রিন দেখে ধাপে ধাপে কাজটি সম্পূর্ণ অটোনমাসভাবে শেষ করো: "
+        ),
+        AgentSkill(
+            id = "vh_app_install",
+            title = "প্রয়োজনীয় অ্যাপ ইনস্টল ও ব্যবহার",
+            subtitle = "অ্যাপ না থাকলে Play Store থেকে ইনস্টল করে কাজ করা",
+            category = SkillCategory.VIRTUAL_HANDS,
+            promptTemplate = "প্রথমে app_list দিয়ে দেখো অ্যাপটি ফোনে আছে কি না। না থাকলে app_install_store দিয়ে Play Store ওপেন করে ইনস্টল শুরু করো এবং Virtual Hands দিয়ে পরবর্তী কাজ সম্পন্ন করো: "
         ),
         AgentSkill(
             id = "vh_screen_audit",
@@ -57,10 +86,17 @@ object AgentSkillRegistry {
         ),
         AgentSkill(
             id = "web_research",
-            title = "ওয়েব রিসার্চ ও রিপোর্ট",
-            subtitle = "লাইভ ব্রাউজারে সার্চ করে ভেরিফাইড সারসংক্ষেপ তৈরি",
+            title = "ওয়েব রিসার্চ ও অটোমেশন",
+            subtitle = "লাইভ ব্রাউজারে ফর্ম ফিল, ক্লিক, স্ক্রল ও রিপোর্ট তৈরি",
             category = SkillCategory.BROWSER_WEB,
-            promptTemplate = "Open the browser, research the following topic thoroughly, verify links, and write a clean report in workspace/research_report.md: "
+            promptTemplate = "Open the live browser, perform the requested online task or research, interact with pages as needed, verify results, and write a clean report in workspace/research_report.md: "
+        ),
+        AgentSkill(
+            id = "github_api_skill",
+            title = "GitHub / API স্কিল ইমপোর্ট ও রান",
+            subtitle = "HTTP দিয়ে GitHub ফাইল বা API ফেচ করে সেভ ও চালানো",
+            category = SkillCategory.CODE_DEV,
+            promptTemplate = "http_request বা browser_download ব্যবহার করে নিচের GitHub/API রিসোর্সটি নিয়ে এসে scripts/ বা workspace/ এ সেভ করো, বিশ্লেষণ করো এবং memory_save দিয়ে সংরক্ষণ করো: "
         ),
         AgentSkill(
             id = "job_cv_apply",
@@ -89,6 +125,13 @@ object AgentSkillRegistry {
             subtitle = "HTML/JS প্রজেক্ট বানিয়ে 127.0.0.1:8080 এ চালু করা",
             category = SkillCategory.CODE_DEV,
             promptTemplate = "Build an interactive HTML/CSS/JS web app inside projects/index.html, start local_server_control on 127.0.0.1:8080, and open it in the integrated browser."
+        ),
+        AgentSkill(
+            id = "cross_app_share",
+            title = "ক্রস-অ্যাপ শেয়ার, ইমেইল ও ক্লিপবোর্ড",
+            subtitle = "অন্যান্য অ্যাপে ডেটা শেয়ার, ক্লিপবোর্ড কপি বা ইমেইল ড্রাফট",
+            category = SkillCategory.AUTOMATION,
+            promptTemplate = "তথ্যটি প্রস্তুত করে device_clipboard এবং device_intent_action (share/email/url) ব্যবহার করে কাজটি সম্পন্ন করো: "
         ),
         AgentSkill(
             id = "youtube_pkg",

@@ -22,6 +22,7 @@ import com.example.runtime.WebServerState
 import com.example.runtime.WorkspaceFileItem
 import com.example.scheduler.AgentForegroundService
 import com.example.security.NetworkEvent
+import com.example.security.SecureKeyStore
 import com.example.security.SecureKeyStore.SecretSlot
 import com.example.storage.AgentMemoryEntity
 import com.example.storage.AgentTaskEntity
@@ -30,6 +31,7 @@ import com.example.storage.AppSettings
 import com.example.storage.AutomationRuleEntity
 import com.example.storage.BookmarkEntity
 import com.example.storage.ExecutionLogEntity
+import com.example.storage.ImportedSkillEntity
 import com.example.storage.PowerProfile
 import com.example.storage.ProviderUsageEntity
 import com.example.ui.theme.ThemeMode
@@ -38,6 +40,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -60,6 +63,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val activeBrowserTabId: StateFlow<String> = container.browserController.activeTabId
     val browserSnapshot: StateFlow<PageSnapshot?> = container.browserController.lastExtractedSnapshot
     val browserLogs: StateFlow<List<String>> = container.browserController.automationLog
+    val browserActivitySignal: StateFlow<Long> = container.browserController.browserActivitySignal
 
     val accessibilityConnected: StateFlow<Boolean> = container.deviceController.accessibilityConnected
     val activeWindowPackage: StateFlow<String> = container.deviceController.activePackage
@@ -77,6 +81,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val bookmarks: StateFlow<List<BookmarkEntity>> = container.repository.bookmarks
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val providerUsage: StateFlow<List<ProviderUsageEntity>> = container.repository.providerUsage
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val importedSkills: StateFlow<List<ImportedSkillEntity>> = container.repository.importedSkills
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // File Manager & Code Editor state
@@ -128,9 +134,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val browserController get() = container.browserController
     val deviceController get() = container.deviceController
     val ramBudgetPresets get() = container.resourceManager.presetRamBudgetsMb
+    val storageQuotaPresets get() = container.resourceManager.presetStorageQuotasMb
 
     init {
-        refreshResources()
+        viewModelScope.launch {
+            val current = container.settingsStore.settings.first()
+            container.resourceManager.refresh(current)
+            if (current.pendingRestartNotice) {
+                container.settingsStore.clearRestartNotice()
+                val geminiKeyCount = container.keyStore.getConfiguredGeminiKeys().size
+                val hasOpenRouter = container.keyStore.hasSecret(SecretSlot.OPENROUTER_API_KEY)
+                val totalKeys = geminiKeyCount + if (hasOpenRouter) 1 else 0
+                showBanner(
+                    "রিস্টার্ট সম্পন্ন: RAM ${current.ramBudgetMb} MB ও ROM ${current.storageQuotaMb} MB সক্রিয় — ${totalKeys}টি API Key ও সব ডেটা/কোড সুরক্ষিত আছে।"
+                )
+            }
+        }
         refreshFiles()
     }
 
@@ -147,12 +166,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun getActiveModelLabel(): String = container.aiRouter.getActiveLabel(settings.value)
 
     fun hasSecret(slot: SecretSlot): Boolean = container.keyStore.hasSecret(slot)
+    fun hasAnyGeminiKey(): Boolean = container.keyStore.hasAnyGeminiKey()
     fun getMaskedSecret(slot: SecretSlot): String = container.keyStore.getMaskedPreview(slot)
 
     fun saveSecret(slot: SecretSlot, value: String) {
         container.keyStore.saveSecret(slot, value)
         showBanner("${slot.label} encrypted in Android Keystore.")
-        if (slot == SecretSlot.GEMINI_API_KEY) fetchGeminiModels()
+        if (slot in SecureKeyStore.geminiSlots) fetchGeminiModels(preferredSlot = slot)
         if (slot == SecretSlot.OPENROUTER_API_KEY) fetchOpenRouterModels()
     }
 
@@ -177,11 +197,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         openRouterModel: String,
         streaming: Boolean,
         autoFallback: Boolean,
-        preferFree: Boolean
+        preferFree: Boolean,
+        fullAutonomousMode: Boolean = true
     ) {
         viewModelScope.launch {
             container.settingsStore.updateProviderConfig(
-                preferredProvider, geminiModel, openRouterModel, streaming, autoFallback, preferFree
+                preferredProvider, geminiModel, openRouterModel, streaming, autoFallback, preferFree, fullAutonomousMode
             )
             showBanner("AI Model Router configuration saved.")
         }
@@ -189,20 +210,60 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateResourceConfig(
         ramBudgetMb: Int,
+        storageQuotaMb: Int,
+        adaptiveDeviceScaling: Boolean,
         lowResourceMode: Boolean,
         powerProfile: PowerProfile,
-        maxConcurrency: Int
+        maxConcurrency: Int,
+        restartAppAfterSave: Boolean = false
     ) {
         viewModelScope.launch {
-            container.settingsStore.updateResourceConfig(ramBudgetMb, lowResourceMode, powerProfile, maxConcurrency)
-            container.resourceManager.refresh(settings.value.copy(
+            withContext(Dispatchers.IO) {
+                container.settingsStore.updateResourceConfig(
+                    ramBudgetMb = ramBudgetMb,
+                    storageQuotaMb = storageQuotaMb,
+                    adaptiveDeviceScaling = adaptiveDeviceScaling,
+                    lowResourceMode = lowResourceMode,
+                    powerProfile = powerProfile,
+                    maxConcurrency = maxConcurrency,
+                    markPendingRestart = restartAppAfterSave
+                )
+                // Flush Room WAL safely to disk before restart so 0 bytes of tasks/memory/skills are lost
+                runCatching {
+                    container.database.openHelper.writableDatabase.query("PRAGMA wal_checkpoint(FULL)").close()
+                }
+            }
+            val updatedSettings = settings.value.copy(
                 ramBudgetMb = ramBudgetMb,
+                storageQuotaMb = storageQuotaMb,
+                adaptiveDeviceScaling = adaptiveDeviceScaling,
                 lowResourceMode = lowResourceMode,
                 powerProfile = powerProfile,
                 maxConcurrency = maxConcurrency
-            ))
-            showBanner("Resource budget updated (${ramBudgetMb} MB).")
+            )
+            container.resourceManager.refresh(updatedSettings)
+            if (restartAppAfterSave) {
+                triggerSafeAppRestart()
+            } else {
+                showBanner("Resource budget updated (RAM ${ramBudgetMb} MB • ROM ${storageQuotaMb} MB).")
+            }
         }
+    }
+
+    private suspend fun triggerSafeAppRestart() {
+        val app = getApplication<Application>()
+        val launchIntent = app.packageManager.getLaunchIntentForPackage(app.packageName)?.apply {
+            addFlags(
+                android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                    android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK
+            )
+        }
+        kotlinx.coroutines.delay(140)
+        if (launchIntent != null) {
+            app.startActivity(launchIntent)
+        }
+        android.os.Process.killProcess(android.os.Process.myPid())
+        kotlin.system.exitProcess(0)
     }
 
     fun clearStorageDirectory(name: String) {
@@ -213,18 +274,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun fetchGeminiModels() {
+    fun fetchGeminiModels(preferredSlot: SecretSlot? = null) {
         viewModelScope.launch {
-            val key = container.keyStore.getSecret(SecretSlot.GEMINI_API_KEY)
+            val key = preferredSlot?.let { container.keyStore.getSecret(it) }?.takeIf { it.isNotBlank() }
+                ?: container.keyStore.getConfiguredGeminiKeys().firstOrNull()?.second
             if (key.isNullOrBlank()) {
-                showBanner("Add a Gemini API key first to discover live models.")
+                showBanner("Add at least one Gemini API key (#1-#5) first to discover live models.")
                 return@launch
             }
             _isFetchingModels.value = true
             container.geminiProvider.fetchAvailableModels(key, forceRefresh = true).fold(
                 onSuccess = { list ->
                     _geminiModels.value = list
-                    showBanner("Discovered ${list.size} live Gemini models from your API key.")
+                    showBanner("Discovered ${list.size} live Gemini models across your active API pool.")
                 },
                 onFailure = { err ->
                     showBanner("Gemini discovery failed: ${err.message}")
@@ -309,6 +371,99 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         container.agentEngine.submitCommand(prompt, currentAttachments)
         if (currentAttachments.isNotEmpty()) {
             _pendingAttachments.value = emptyList()
+        }
+    }
+
+    // Universal Auto-Skill Importer Actions
+    fun importSkillFromUris(context: Context, uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val importedNames = mutableListOf<String>()
+            var lastError: String? = null
+            for (uri in uris) {
+                runCatching {
+                    val resolver = context.contentResolver
+                    val name = queryDisplayName(context, uri) ?: "skill_${System.currentTimeMillis()}.md"
+                    val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: ByteArray(0)
+                    require(bytes.isNotEmpty()) { "$name ফাইলটি খালি।" }
+                    require(bytes.size <= 15 * 1024 * 1024) { "$name ১৫ MB এর বেশি।" }
+                    val savedFile = container.workspaceManager.saveUploadedFile(name, bytes).getOrThrow()
+                    val relPath = container.workspaceManager.relativePathOf(savedFile)
+                    container.universalSkillManager.importFromUploadedPath(relPath, displayName = name).getOrThrow()
+                }.onSuccess { skill ->
+                    importedNames.add("${skill.title} [${skill.ecosystem}, ${skill.wordCount}w]")
+                }.onFailure { err ->
+                    lastError = err.message
+                }
+            }
+            refreshFiles()
+            if (importedNames.isNotEmpty()) {
+                showBanner("অটো-স্কিল যুক্ত হয়েছে: ${importedNames.joinToString(", ")}")
+            } else if (lastError != null) {
+                showBanner("স্কিল ইমপোর্ট ব্যর্থ: $lastError")
+            }
+        }
+    }
+
+    fun importSkillFromSource(source: String, titleHint: String = "") {
+        val trimmed = source.trim()
+        if (trimmed.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            container.universalSkillManager.importAuto(trimmed, titleHint).fold(
+                onSuccess = { sk ->
+                    refreshFiles()
+                    showBanner("অটো-কনফিগার সম্পন্ন: ${sk.title} (${sk.ecosystem} • ${sk.wordCount} words)")
+                },
+                onFailure = { err ->
+                    showBanner("স্কিল ইমপোর্ট ব্যর্থ: ${err.message}")
+                }
+            )
+        }
+    }
+
+    fun absorbPendingAttachmentsAsSkills() {
+        val current = _pendingAttachments.value
+        if (current.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val absorbedIds = mutableSetOf<String>()
+            val importedTitles = mutableListOf<String>()
+            var lastError: String? = null
+            for (att in current) {
+                container.universalSkillManager.importFromUploadedPath(
+                    relativePath = att.relativePath,
+                    displayName = att.displayName
+                ).onSuccess { sk ->
+                    absorbedIds.add(att.id)
+                    importedTitles.add("${sk.title} [${sk.ecosystem}]")
+                }.onFailure { err ->
+                    lastError = err.message
+                }
+            }
+            if (absorbedIds.isNotEmpty()) {
+                _pendingAttachments.update { list -> list.filterNot { it.id in absorbedIds } }
+                refreshFiles()
+                showBanner("${absorbedIds.size}টি ফাইল অটো-স্কিল হিসেবে যুক্ত হয়েছে: ${importedTitles.joinToString(", ")}")
+            } else if (lastError != null) {
+                showBanner("স্কিল অ্যাবজর্ব ব্যর্থ: $lastError")
+            }
+        }
+    }
+
+    fun toggleImportedSkill(slug: String, enabled: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            container.universalSkillManager.setSkillEnabled(slug, enabled)
+        }
+    }
+
+    fun deleteImportedSkill(slug: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            container.universalSkillManager.deleteSkill(slug).fold(
+                onSuccess = {
+                    refreshFiles()
+                    showBanner("স্কিল মুছে ফেলা হয়েছে ($slug)")
+                },
+                onFailure = { showBanner("মুছে ফেলতে ব্যর্থ: ${it.message}") }
+            )
         }
     }
 

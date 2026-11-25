@@ -40,7 +40,7 @@ class PersonalAiAccessibilityService : AccessibilityService() {
             if (!CommandSecurityGuard.isProtectedPackage(pkg)) {
                 rootInActiveWindow?.let { root ->
                     val collected = mutableListOf<ObservedUiNode>()
-                    traverseNode(root, collected, 30)
+                    traverseNode(root, collected, 45)
                     _liveNodes.value = collected
                 }
             }
@@ -55,7 +55,12 @@ class PersonalAiAccessibilityService : AccessibilityService() {
         _isConnected.value = false
     }
 
-    fun inspectActiveWindowNodes(maxNodes: Int = 55): Result<List<ObservedUiNode>> {
+    fun getScreenSize(): Pair<Int, Int> {
+        val dm = resources.displayMetrics
+        return dm.widthPixels to dm.heightPixels
+    }
+
+    fun inspectActiveWindowNodes(maxNodes: Int = 90): Result<List<ObservedUiNode>> {
         val pkg = _activePackage.value
         if (CommandSecurityGuard.isProtectedPackage(pkg)) {
             return Result.failure(
@@ -63,7 +68,7 @@ class PersonalAiAccessibilityService : AccessibilityService() {
             )
         }
         val root = rootInActiveWindow
-            ?: return Result.failure(IllegalStateException("No active window root available."))
+            ?: return Result.failure(IllegalStateException("No active window root available. Open a screen first."))
         val collected = mutableListOf<ObservedUiNode>()
         traverseNode(root, collected, maxNodes)
         _liveNodes.value = collected
@@ -76,14 +81,19 @@ class PersonalAiAccessibilityService : AccessibilityService() {
         node.getBoundsInScreen(rect)
         val rawText = if (node.isPassword) "[REDACTED_PASSWORD]" else node.text?.toString().orEmpty()
         val desc = node.contentDescription?.toString().orEmpty()
+        val hint = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !node.isPassword) {
+            node.hintText?.toString().orEmpty()
+        } else ""
         val viewId = node.viewIdResourceName?.substringAfterLast("/") ?: ""
+        val displayLabel = rawText.ifBlank { hint }
 
-        if (rawText.isNotBlank() || desc.isNotBlank() || node.isClickable || node.isEditable) {
+        val visibleOnScreen = rect.width() > 0 && rect.height() > 0
+        if (visibleOnScreen && (displayLabel.isNotBlank() || desc.isNotBlank() || node.isClickable || node.isEditable)) {
             out.add(
                 ObservedUiNode(
-                    text = rawText.take(90),
-                    contentDesc = desc.take(90),
-                    viewId = viewId.take(40),
+                    text = displayLabel.take(100),
+                    contentDesc = desc.take(100),
+                    viewId = viewId.take(45),
                     className = node.className?.toString()?.substringAfterLast(".") ?: "View",
                     bounds = "${rect.left},${rect.top},${rect.right},${rect.bottom}",
                     centerX = rect.exactCenterX(),
@@ -101,15 +111,19 @@ class PersonalAiAccessibilityService : AccessibilityService() {
 
     fun performTap(x: Float, y: Float): Boolean {
         if (CommandSecurityGuard.isProtectedPackage(_activePackage.value)) return false
-        val path = Path().apply { moveTo(x, y) }
-        val stroke = GestureDescription.StrokeDescription(path, 0L, 60L)
+        val safeX = x.coerceAtLeast(1f)
+        val safeY = y.coerceAtLeast(1f)
+        val path = Path().apply { moveTo(safeX, safeY) }
+        val stroke = GestureDescription.StrokeDescription(path, 0L, 65L)
         return dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
     }
 
     fun performDoubleTap(x: Float, y: Float): Boolean {
         if (CommandSecurityGuard.isProtectedPackage(_activePackage.value)) return false
-        val p1 = Path().apply { moveTo(x, y) }
-        val p2 = Path().apply { moveTo(x, y) }
+        val safeX = x.coerceAtLeast(1f)
+        val safeY = y.coerceAtLeast(1f)
+        val p1 = Path().apply { moveTo(safeX, safeY) }
+        val p2 = Path().apply { moveTo(safeX, safeY) }
         val s1 = GestureDescription.StrokeDescription(p1, 0L, 45L)
         val s2 = GestureDescription.StrokeDescription(p2, 120L, 45L)
         return dispatchGesture(GestureDescription.Builder().addStroke(s1).addStroke(s2).build(), null, null)
@@ -117,16 +131,18 @@ class PersonalAiAccessibilityService : AccessibilityService() {
 
     fun performLongPress(x: Float, y: Float): Boolean {
         if (CommandSecurityGuard.isProtectedPackage(_activePackage.value)) return false
-        val path = Path().apply { moveTo(x, y) }
-        val stroke = GestureDescription.StrokeDescription(path, 0L, 650L)
+        val safeX = x.coerceAtLeast(1f)
+        val safeY = y.coerceAtLeast(1f)
+        val path = Path().apply { moveTo(safeX, safeY) }
+        val stroke = GestureDescription.StrokeDescription(path, 0L, 680L)
         return dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
     }
 
-    fun performSwipe(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long = 350L): Boolean {
+    fun performSwipe(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long = 340L): Boolean {
         if (CommandSecurityGuard.isProtectedPackage(_activePackage.value)) return false
         val path = Path().apply {
-            moveTo(x1, y1)
-            lineTo(x2, y2)
+            moveTo(x1.coerceAtLeast(1f), y1.coerceAtLeast(1f))
+            lineTo(x2.coerceAtLeast(1f), y2.coerceAtLeast(1f))
         }
         val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs.coerceIn(100L, 1500L))
         return dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
@@ -138,20 +154,30 @@ class PersonalAiAccessibilityService : AccessibilityService() {
         val cx = dm.widthPixels / 2f
         val cy = dm.heightPixels / 2f
         return when (direction.lowercase()) {
-            "down" -> performSwipe(cx, dm.heightPixels * 0.72f, cx, dm.heightPixels * 0.25f, 380L)
-            "up" -> performSwipe(cx, dm.heightPixels * 0.28f, cx, dm.heightPixels * 0.75f, 380L)
-            "left" -> performSwipe(dm.widthPixels * 0.8f, cy, dm.widthPixels * 0.2f, cy, 320L)
-            "right" -> performSwipe(dm.widthPixels * 0.2f, cy, dm.widthPixels * 0.8f, cy, 320L)
-            else -> performSwipe(cx, dm.heightPixels * 0.72f, cx, dm.heightPixels * 0.25f, 380L)
+            "down" -> performSwipe(cx, dm.heightPixels * 0.74f, cx, dm.heightPixels * 0.24f, 360L)
+            "up" -> performSwipe(cx, dm.heightPixels * 0.26f, cx, dm.heightPixels * 0.76f, 360L)
+            "left" -> performSwipe(dm.widthPixels * 0.82f, cy, dm.widthPixels * 0.18f, cy, 300L)
+            "right" -> performSwipe(dm.widthPixels * 0.18f, cy, dm.widthPixels * 0.82f, cy, 300L)
+            else -> performSwipe(cx, dm.heightPixels * 0.74f, cx, dm.heightPixels * 0.24f, 360L)
         }
     }
 
     fun setTextByQuery(query: String, text: String): Boolean {
         if (CommandSecurityGuard.isProtectedPackage(_activePackage.value)) return false
         val root = rootInActiveWindow ?: return false
-        val target = findEditableOrMatchingNode(root, query.lowercase()) ?: return false
+        val target = findEditableOrMatchingNode(root, query.lowercase())
+            ?: root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            ?: return false
         if (target.isPassword) return false
+
+        // Tap/focus first so Compose/WebView inputs activate properly
+        val rect = Rect()
+        target.getBoundsInScreen(rect)
         target.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        if (rect.width() > 0 && rect.height() > 0) {
+            performTap(rect.exactCenterX(), rect.exactCenterY())
+        }
         val args = Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
@@ -165,29 +191,64 @@ class PersonalAiAccessibilityService : AccessibilityService() {
             ?: findEditableOrMatchingNode(root, "")
             ?: return false
         if (focused.isPassword) return false
+        focused.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
         val args = Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
         return focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
     }
 
+    fun performImeEnter(): Boolean {
+        if (CommandSecurityGuard.isProtectedPackage(_activePackage.value)) return false
+        val root = rootInActiveWindow ?: return false
+        val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            ?: findEditableOrMatchingNode(root, "")
+        if (focused != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (focused.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)) {
+                return true
+            }
+        }
+        // Fallback: try common submit/search/send/go buttons
+        val submitLabels = listOf("Search", "Send", "Go", "Submit", "Next", "Done", "Enter")
+        for (lbl in submitLabels) {
+            if (clickNodeByText(lbl)) return true
+        }
+        return false
+    }
+
     fun clickNodeByText(query: String): Boolean {
         if (CommandSecurityGuard.isProtectedPackage(_activePackage.value)) return false
         val root = rootInActiveWindow ?: return false
+        val qLower = query.trim().lowercase()
+        if (qLower.isEmpty()) return false
+
+        // 1. Standard Accessibility text search -> clickable parent
         val matches = root.findAccessibilityNodeInfosByText(query)
         for (node in matches) {
+            if (node.isPassword) continue
             var current: AccessibilityNodeInfo? = node
             while (current != null) {
                 if (current.isClickable && !current.isPassword) {
-                    return current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    if (current.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
                 }
                 current = current.parent
             }
         }
-        // Fallback: check contentDescription or viewIdResourceName across the active tree
-        val altMatch = findClickableByAny(root, query.lowercase())
-        if (altMatch != null) {
-            return altMatch.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+
+        // 2. Deep search across text, contentDescription, viewId, hintText -> clickable parent
+        val altClickable = findClickableByAny(root, qLower)
+        if (altClickable != null && altClickable.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+            return true
+        }
+
+        // 3. Coordinate tap fallback for Compose/WebView/Flutter nodes without clickable flag
+        val anyMatchingLeaf = matches.firstOrNull { !it.isPassword } ?: findAnyNodeByQuery(root, qLower)
+        if (anyMatchingLeaf != null && !anyMatchingLeaf.isPassword) {
+            val rect = Rect()
+            anyMatchingLeaf.getBoundsInScreen(rect)
+            if (rect.width() > 0 && rect.height() > 0) {
+                return performTap(rect.exactCenterX(), rect.exactCenterY())
+            }
         }
         return false
     }
@@ -203,14 +264,10 @@ class PersonalAiAccessibilityService : AccessibilityService() {
 
     private fun findClickableByAny(node: AccessibilityNodeInfo?, q: String): AccessibilityNodeInfo? {
         if (node == null) return null
-        val txt = node.text?.toString().orEmpty()
-        val desc = node.contentDescription?.toString().orEmpty()
-        val vid = node.viewIdResourceName.orEmpty()
-        val combined = "$txt $desc $vid".lowercase()
-        if (combined.contains(q) && !node.isPassword) {
+        if (nodeMatchesQuery(node, q) && !node.isPassword) {
             var p: AccessibilityNodeInfo? = node
             while (p != null) {
-                if (p.isClickable) return p
+                if (p.isClickable && !p.isPassword) return p
                 p = p.parent
             }
         }
@@ -219,6 +276,28 @@ class PersonalAiAccessibilityService : AccessibilityService() {
             if (found != null) return found
         }
         return null
+    }
+
+    private fun findAnyNodeByQuery(node: AccessibilityNodeInfo?, q: String): AccessibilityNodeInfo? {
+        if (node == null) return null
+        if (nodeMatchesQuery(node, q) && !node.isPassword) {
+            val rect = Rect()
+            node.getBoundsInScreen(rect)
+            if (rect.width() > 0 && rect.height() > 0) return node
+        }
+        for (i in 0 until node.childCount) {
+            val found = findAnyNodeByQuery(node.getChild(i), q)
+            if (found != null) return found
+        }
+        return null
+    }
+
+    private fun nodeMatchesQuery(node: AccessibilityNodeInfo, q: String): Boolean {
+        val txt = node.text?.toString().orEmpty()
+        val desc = node.contentDescription?.toString().orEmpty()
+        val vid = node.viewIdResourceName.orEmpty()
+        val hint = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) node.hintText?.toString().orEmpty() else ""
+        return "$txt $desc $vid $hint".lowercase().contains(q)
     }
 
     private fun findEditableOrMatchingNode(node: AccessibilityNodeInfo?, query: String): AccessibilityNodeInfo? {

@@ -35,6 +35,10 @@ data class DeviceResourceSnapshot(
     val cpuLoadNote: String = "",
     val storageFreeGb: Double = 0.0,
     val storageTotalGb: Double = 0.0,
+    val virtualEnvUsedMb: Double = 0.0,
+    val storageQuotaMb: Int = 2048,
+    val deviceTierLabel: String = "Standard Android",
+    val recommendedMaxAgentSteps: Int = 24,
     val directoryStats: List<DirectoryStorageStat> = emptyList(),
     val effectiveConcurrency: Int = 2,
     val warningMessage: String? = null
@@ -47,7 +51,8 @@ class DeviceResourceManager(
     private val _snapshot = MutableStateFlow(DeviceResourceSnapshot())
     val snapshot: StateFlow<DeviceResourceSnapshot> = _snapshot.asStateFlow()
 
-    val presetRamBudgetsMb = listOf(512, 1024, 2048, 3072, 4096, 6144, 8192)
+    val presetRamBudgetsMb = listOf(512, 1024, 2048, 3072, 4096, 6144, 8192, 12288)
+    val presetStorageQuotasMb = listOf(512, 1024, 2048, 4096, 8192, 16384)
 
     suspend fun refresh(settings: AppSettings): DeviceResourceSnapshot = withContext(Dispatchers.IO) {
         val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
@@ -71,21 +76,36 @@ class DeviceResourceManager(
         val statFs = StatFs(context.filesDir.absolutePath)
         val freeBytes = statFs.availableBytes
         val totalBytes = statFs.totalBytes
+        val freeMb = freeBytes / (1024L * 1024L)
 
         val dirStats = listOf(
             statDir("Workspace", workspaceManager.workspaceDir, clearable = false),
-            statDir("Projects", workspaceManager.projectsDir, clearable = false),
+            statDir("Projects & CAD", workspaceManager.projectsDir, clearable = false),
             statDir("Scripts", workspaceManager.scriptsDir, clearable = false),
+            statDir("Imported Skills", workspaceManager.skillsDir, clearable = false),
             statDir("Downloads", workspaceManager.downloadsDir, clearable = true),
             statDir("Agent Memory", workspaceManager.memoryDir, clearable = false),
             statDir("Temporary Files", workspaceManager.tmpDir, clearable = true),
             statDir("App Cache", context.cacheDir, clearable = true)
         )
+        val virtualUsedMb = dirStats.filterNot { it.name == "App Cache" }
+            .sumOf { it.bytesUsed } / (1024.0 * 1024.0)
+
+        val cpuCores = runtime.availableProcessors()
+        val deviceTier = when {
+            totalRamMb >= 7500 && cpuCores >= 8 -> "Flagship (${totalRamMb / 1024}GB+ RAM • High-Speed)"
+            totalRamMb >= 3800 -> "Mid-Range (${(totalRamMb / 1024.0).let { "%.1f".format(it) }}GB RAM • Balanced)"
+            else -> "Compact (<4GB RAM • Eco-Adaptive)"
+        }
 
         val recommendedConcurrency = computeEffectiveConcurrency(settings, availRamMb, memInfo.lowMemory)
+        val recommendedSteps = computeRecommendedSteps(settings, totalRamMb, memInfo.lowMemory)
+
         val warning = when {
             memInfo.lowMemory -> "Android reports low system memory (${availRamMb} MB free). Concurrency reduced to $recommendedConcurrency."
-            settings.ramBudgetMb > totalRamMb -> "Selected budget (${settings.ramBudgetMb} MB) exceeds physical RAM (${totalRamMb} MB). Execution limits clamped safely."
+            settings.ramBudgetMb > totalRamMb -> "Selected RAM budget (${settings.ramBudgetMb} MB) exceeds physical RAM (${totalRamMb} MB). Safeguards active."
+            settings.storageQuotaMb > freeMb -> "Custom ROM quota (${settings.storageQuotaMb} MB) exceeds device free storage ($freeMb MB)."
+            virtualUsedMb > settings.storageQuotaMb * 0.9 -> "Workspace storage (${"%.0f".format(virtualUsedMb)} MB) is nearing your ROM quota (${settings.storageQuotaMb} MB)."
             availRamMb < 450 -> "Available RAM is tight (${availRamMb} MB). Enable Low Resource Mode for heavy tasks."
             else -> null
         }
@@ -98,17 +118,42 @@ class DeviceResourceManager(
             appHeapMaxMb = heapMaxMb,
             lowMemoryFlag = memInfo.lowMemory,
             memoryPressureLabel = pressure,
-            cpuCores = runtime.availableProcessors(),
+            cpuCores = cpuCores,
             primaryAbi = Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown",
             cpuLoadNote = readCpuNote(),
             storageFreeGb = freeBytes / (1024.0 * 1024.0 * 1024.0),
             storageTotalGb = totalBytes / (1024.0 * 1024.0 * 1024.0),
+            virtualEnvUsedMb = virtualUsedMb,
+            storageQuotaMb = settings.storageQuotaMb,
+            deviceTierLabel = deviceTier,
+            recommendedMaxAgentSteps = recommendedSteps,
             directoryStats = dirStats,
             effectiveConcurrency = recommendedConcurrency,
             warningMessage = warning
         )
         _snapshot.value = result
         result
+    }
+
+    fun computeRecommendedSteps(
+        settings: AppSettings,
+        totalRamMb: Long,
+        lowMemory: Boolean
+    ): Int {
+        if (lowMemory || settings.lowResourceMode || settings.powerProfile == PowerProfile.LOW_POWER) {
+            return 14
+        }
+        val base = when (settings.powerProfile) {
+            PowerProfile.LOW_POWER -> 14
+            PowerProfile.BALANCED -> 24
+            PowerProfile.PERFORMANCE -> 36
+        }
+        return if (!settings.adaptiveDeviceScaling) base
+        else when {
+            totalRamMb < 3200 -> minOf(base, 18)
+            totalRamMb >= 7500 && settings.ramBudgetMb >= 3072 -> maxOf(base, 32)
+            else -> base
+        }
     }
 
     fun computeEffectiveConcurrency(

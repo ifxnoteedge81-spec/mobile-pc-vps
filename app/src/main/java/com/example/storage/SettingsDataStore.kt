@@ -33,11 +33,15 @@ data class AppSettings(
     val streamingEnabled: Boolean = true,
     val autoFallbackEnabled: Boolean = true,
     val preferFreeModelsOnSimpleTasks: Boolean = true,
+    val fullAutonomousMode: Boolean = true,
     val ramBudgetMb: Int = 1024,
+    val storageQuotaMb: Int = 2048,
+    val adaptiveDeviceScaling: Boolean = true,
     val lowResourceMode: Boolean = false,
     val powerProfile: PowerProfile = PowerProfile.BALANCED,
     val maxConcurrency: Int = 2,
-    val preferredLanguage: String = "Auto (Bangla & English)"
+    val preferredLanguage: String = "Auto (Bangla & English)",
+    val pendingRestartNotice: Boolean = false
 )
 
 class SettingsDataStore(private val context: Context) {
@@ -50,11 +54,15 @@ class SettingsDataStore(private val context: Context) {
         val STREAMING = booleanPreferencesKey("streaming_enabled")
         val AUTO_FALLBACK = booleanPreferencesKey("auto_fallback")
         val PREFER_FREE = booleanPreferencesKey("prefer_free_simple")
+        val FULL_AUTONOMOUS = booleanPreferencesKey("full_autonomous_mode")
         val RAM_BUDGET_MB = intPreferencesKey("ram_budget_mb")
+        val STORAGE_QUOTA_MB = intPreferencesKey("storage_quota_mb")
+        val ADAPTIVE_SCALING = booleanPreferencesKey("adaptive_device_scaling")
         val LOW_RESOURCE_MODE = booleanPreferencesKey("low_resource_mode")
         val POWER_PROFILE = stringPreferencesKey("power_profile")
         val MAX_CONCURRENCY = intPreferencesKey("max_concurrency")
         val PREFERRED_LANGUAGE = stringPreferencesKey("preferred_language")
+        val PENDING_RESTART_NOTICE = booleanPreferencesKey("pending_restart_notice")
     }
 
     val settings: Flow<AppSettings> = context.dataStore.data.map { prefs ->
@@ -66,11 +74,15 @@ class SettingsDataStore(private val context: Context) {
             streamingEnabled = prefs[Keys.STREAMING] ?: true,
             autoFallbackEnabled = prefs[Keys.AUTO_FALLBACK] ?: true,
             preferFreeModelsOnSimpleTasks = prefs[Keys.PREFER_FREE] ?: true,
+            fullAutonomousMode = prefs[Keys.FULL_AUTONOMOUS] ?: true,
             ramBudgetMb = prefs[Keys.RAM_BUDGET_MB] ?: 1024,
+            storageQuotaMb = prefs[Keys.STORAGE_QUOTA_MB] ?: 2048,
+            adaptiveDeviceScaling = prefs[Keys.ADAPTIVE_SCALING] ?: true,
             lowResourceMode = prefs[Keys.LOW_RESOURCE_MODE] ?: false,
             powerProfile = runCatching { PowerProfile.valueOf(prefs[Keys.POWER_PROFILE] ?: "BALANCED") }.getOrDefault(PowerProfile.BALANCED),
             maxConcurrency = prefs[Keys.MAX_CONCURRENCY] ?: 2,
-            preferredLanguage = prefs[Keys.PREFERRED_LANGUAGE] ?: "Auto (Bangla & English)"
+            preferredLanguage = prefs[Keys.PREFERRED_LANGUAGE] ?: "Auto (Bangla & English)",
+            pendingRestartNotice = prefs[Keys.PENDING_RESTART_NOTICE] ?: false
         )
     }
 
@@ -84,7 +96,8 @@ class SettingsDataStore(private val context: Context) {
         openRouterModel: String,
         streaming: Boolean,
         autoFallback: Boolean,
-        preferFree: Boolean
+        preferFree: Boolean,
+        fullAutonomousMode: Boolean = true
     ) {
         context.dataStore.edit {
             it[Keys.PREFERRED_PROVIDER] = preferredProvider.name
@@ -93,20 +106,33 @@ class SettingsDataStore(private val context: Context) {
             it[Keys.STREAMING] = streaming
             it[Keys.AUTO_FALLBACK] = autoFallback
             it[Keys.PREFER_FREE] = preferFree
+            it[Keys.FULL_AUTONOMOUS] = fullAutonomousMode
         }
     }
 
     suspend fun updateResourceConfig(
         ramBudgetMb: Int,
+        storageQuotaMb: Int = 2048,
+        adaptiveDeviceScaling: Boolean = true,
         lowResourceMode: Boolean,
         powerProfile: PowerProfile,
-        maxConcurrency: Int
+        maxConcurrency: Int,
+        markPendingRestart: Boolean = false
     ) {
         context.dataStore.edit {
-            it[Keys.RAM_BUDGET_MB] = ramBudgetMb.coerceIn(256, 16384)
+            it[Keys.RAM_BUDGET_MB] = ramBudgetMb.coerceIn(256, 32768)
+            it[Keys.STORAGE_QUOTA_MB] = storageQuotaMb.coerceIn(256, 65536)
+            it[Keys.ADAPTIVE_SCALING] = adaptiveDeviceScaling
             it[Keys.LOW_RESOURCE_MODE] = lowResourceMode
             it[Keys.POWER_PROFILE] = powerProfile.name
             it[Keys.MAX_CONCURRENCY] = maxConcurrency.coerceIn(1, 6)
+            if (markPendingRestart) {
+                it[Keys.PENDING_RESTART_NOTICE] = true
+            }
         }
+    }
+
+    suspend fun clearRestartNotice() {
+        context.dataStore.edit { it[Keys.PENDING_RESTART_NOTICE] = false }
     }
 }

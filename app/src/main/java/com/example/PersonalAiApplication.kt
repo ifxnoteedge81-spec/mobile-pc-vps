@@ -5,11 +5,13 @@ import android.content.Context
 import com.example.accessibility.DeviceAutomationController
 import com.example.agent.AutonomousAgentEngine
 import com.example.agent.ToolRegistry
+import com.example.agent.UniversalSkillManager
 import com.example.ai.AiModelRouter
 import com.example.ai.GeminiProvider
 import com.example.ai.OpenRouterProvider
 import com.example.browser.BrowserController
 import com.example.resources.DeviceResourceManager
+import com.example.runtime.CadDrawingEngine
 import com.example.runtime.LocalJsEngine
 import com.example.runtime.LocalLinuxEnvironment
 import com.example.runtime.LocalPythonEngine
@@ -40,10 +42,12 @@ class AppContainer(context: Context) {
     val jsEngine = LocalJsEngine(context)
     val webServer = LocalWebServer(workspaceManager, appScope)
     val linuxEnv = LocalLinuxEnvironment(workspaceManager, pythonEngine, jsEngine, webServer)
+    val cadEngine = CadDrawingEngine(workspaceManager)
 
     val browserController = BrowserController(workspaceManager, auditLogger)
     val deviceController = DeviceAutomationController(context)
     val workScheduler = AgentWorkScheduler(context)
+    val universalSkillManager = UniversalSkillManager(workspaceManager, repository, auditLogger)
 
     val geminiProvider = GeminiProvider(auditLogger)
     val openRouterProvider = OpenRouterProvider(auditLogger)
@@ -55,9 +59,12 @@ class AppContainer(context: Context) {
         pythonEngine = pythonEngine,
         jsEngine = jsEngine,
         webServer = webServer,
+        cadEngine = cadEngine,
+        resourceManager = resourceManager,
         browser = browserController,
         deviceController = deviceController,
-        repository = repository
+        repository = repository,
+        skillManager = universalSkillManager
     )
 
     val agentEngine = AutonomousAgentEngine(
@@ -67,6 +74,7 @@ class AppContainer(context: Context) {
         repository = repository,
         linuxEnv = linuxEnv,
         resourceManager = resourceManager,
+        skillManager = universalSkillManager,
         settingsFlow = settingsStore.settings,
         onInterventionAlert = { req ->
             com.example.scheduler.AgentForegroundService.postInterventionNotification(

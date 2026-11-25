@@ -8,6 +8,7 @@ import com.example.runtime.LocalLinuxEnvironment
 import com.example.security.PermissionLevel
 import com.example.storage.AgentRepository
 import com.example.storage.AppSettings
+import com.example.storage.MemoryCategory
 import com.example.storage.TaskStatus
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -21,6 +22,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import java.util.concurrent.CopyOnWriteArrayList
 
 enum class FeedEntryKind {
     USER_COMMAND,
@@ -59,6 +61,7 @@ class AutonomousAgentEngine(
     private val repository: AgentRepository,
     private val linuxEnv: LocalLinuxEnvironment,
     private val resourceManager: DeviceResourceManager,
+    private val skillManager: UniversalSkillManager,
     private val settingsFlow: kotlinx.coroutines.flow.Flow<AppSettings>,
     private val onInterventionAlert: (HumanInterventionRequest) -> Unit = {}
 ) {
@@ -69,6 +72,9 @@ class AutonomousAgentEngine(
     private var permissionDeferred: CompletableDeferred<Boolean>? = null
     private var interventionDeferred: CompletableDeferred<String>? = null
 
+    // Keeps active session conversation turns so user never has to repeat context
+    private val sessionTurns = CopyOnWriteArrayList<AiMessage>()
+
     fun submitCommand(
         userPrompt: String,
         attachments: List<AgentUploadedAttachment> = emptyList()
@@ -76,7 +82,6 @@ class AutonomousAgentEngine(
         val trimmed = userPrompt.trim()
         if (trimmed.isEmpty() && attachments.isEmpty()) return
 
-        // Support instant local slash commands even when completely offline
         if (attachments.isEmpty() && (trimmed.startsWith("/sh ") || trimmed.startsWith("/py "))) {
             runDirectLocalShortcut(trimmed)
             return
@@ -151,6 +156,7 @@ class AutonomousAgentEngine(
     }
 
     fun clearFeed() {
+        sessionTurns.clear()
         _state.update { it.copy(feed = emptyList(), streamingBuffer = "") }
     }
 
@@ -162,7 +168,8 @@ class AutonomousAgentEngine(
             val args = if (isPy) JSONObject().put("code", cmd.removePrefix("/py ").trim())
             else JSONObject().put("command", cmd.removePrefix("/sh ").trim())
 
-            val perm = toolRegistry.evaluatePermission(tool, args)
+            val settings = settingsFlow.first()
+            val perm = toolRegistry.evaluatePermission(tool, args, settings.fullAutonomousMode)
             if (perm != null && perm.level == PermissionLevel.RESTRICTED) {
                 appendFeed(FeedEntryKind.ERROR_NOTICE, "Blocked (Level 3)", perm.summary)
                 return@launch
@@ -219,7 +226,7 @@ class AutonomousAgentEngine(
                 isPaused = false,
                 pendingIntervention = null,
                 activeModelLabel = modelLabel,
-                currentPhaseLabel = "Step 1: Analyzing objective, uploads & live API...",
+                currentPhaseLabel = "Step 1: Planning with memory & live API...",
                 streamingBuffer = ""
             )
         }
@@ -230,51 +237,90 @@ class AutonomousAgentEngine(
 
         val memories = repository.getMemorySnapshot()
         val memoryContext = if (memories.isEmpty()) "None saved yet."
-        else memories.take(15).joinToString("\n") { "- [${it.category}] ${it.memoryKey}: ${it.content}" }
+        else memories.take(25).joinToString("\n") { "- [${it.category}] ${it.memoryKey}: ${it.content.take(260)}" }
+
+        val recentTasks = repository.getRecentTasksSnapshot(8)
+            .filter { it.id != taskId && it.finalReport.isNotBlank() }
+            .take(6)
+        val continuityContext = if (recentTasks.isEmpty()) "None yet."
+        else recentTasks.reversed().joinToString("\n") { t ->
+            "- User: ${t.prompt.take(180)} -> Result: ${t.finalReport.take(240)}"
+        }
+
+        val importedSkills = repository.getEnabledImportedSkillsSnapshot()
+        val importedSkillsIndex = if (importedSkills.isEmpty()) {
+            "None imported yet."
+        } else {
+            importedSkills.take(30).joinToString("\n") { sk ->
+                "- [${sk.slug}] ${sk.title} (${sk.ecosystem}, ${sk.wordCount} words/${sk.lineCount} lines): ${sk.description.take(160)}"
+            }
+        }
+
+        val attachmentHint = if (attachments.any { skillManager.looksLikeSkillFile(it.displayName, it.textExcerpt) }) {
+            "\nNOTE: User attached file(s) that look like an external AI skill. If user wants to add/install/use them as skills, immediately call `skill_import_auto(source=\"uploads/...\")` on the file's relative path so all bundled instructions (even 10,000+ lines) are permanently absorbed!"
+        } else ""
 
         val systemPrompt = """
-            You are PERSONAL AI COMPUTER, an autonomous local-first Android AI Agent Engine inspired by OpenClaw.
-            You control real on-device tools inside a sandboxed Linux workspace (virtual_env), an on-device Python & JS V8 runtime, an integrated Chromium WebView browser, and full Android Accessibility Virtual Hands (app_list, app_launch, device_screen_inspect, device_virtual_hand).
+            You are PERSONAL AI COMPUTER, a next-generation autonomous Android & Online Engineering AI OS designed to surpass standard agents in reliability, hardware adaptability, and real execution depth.
+            You control real on-device tools:
+            • Code & Terminal: Linux shell (`shell_exec`), Python 3 (`python_exec`), V8 JS/TS (`js_exec`), multi-file search (`workspace_grep`), file I/O (`file_list`, `file_read`, `file_write`, `file_delete`), local HTTP server (`local_server_control`).
+            • CAD & Engineering Design: `cad_generate_drawing` creates real AutoCAD ASCII DXF (`.dxf`), dimensioned SVG Blueprints (`.svg`), interactive pan/zoom HTML viewers (`_viewer.html`), AND 3D CAD `.stl` meshes for ANY architectural floor plan, mechanical bracket, gear, PCB, civil drawing, or custom geometry!
+            • Web & Research: Fast HTTPS (`http_request`) + Live Chromium Browser (`browser_open_and_read`, `browser_click`, `browser_fill`, `browser_scroll`, `browser_eval_js`, `browser_download`).
+            • Full Phone Virtual Hands: `app_list`, `app_launch`, `app_install_store`, `device_screen_inspect`, `device_virtual_hand`, `device_clipboard`, `device_intent_action`.
+            • Universal Auto-Skill Adapter: `skill_import_auto`, `skill_list`, `skill_load`, `skill_delete` (absorbs any Anthropic/OpenClaw/MCP/Gemini/ZIP/10,000+ line skill automatically).
+            • Hardware & Memory: `system_hardware_status`, `memory_read`, `memory_save`, `schedule_automation`.
 
-            CRITICAL RULES:
-            1. Support both Bangla and English seamlessly. Reply in the same language the user used (Bangla or English).
-            2. NEVER fabricate tool outputs, file creation, web searches, or command results. ALWAYS call the real tools and observe their actual outputs before reporting completion.
-            3. Follow the 3-Tier Permission Policy:
-               - Level 1 (Safe): workspace read/write (including uploaded files in uploads/), safe shell/python/js, public web browsing/reading, inspecting screen.
-               - Level 2 (Confirmation): deleting files, filling forms, downloading files, Virtual Hand device gestures, launching apps, scheduling automations.
-               - Level 3 (Restricted): NEVER bypass login, OTP, CAPTCHA, biometrics, banking, or execute destructive OS commands.
-            4. HUMAN-IN-THE-LOOP PAUSE & RESUME:
-               Whenever you encounter a CAPTCHA, OTP, 2FA, login gate, or any interactive check that you cannot or must not bypass yourself, IMMEDIATELY call `request_human_intervention` so the Live Screen pops up inside the user's Agent Chat Box. When the user resolves it and clicks Resume, inspect the updated browser/screen state and continue seamlessly from that exact step!
-            5. Keep responses concise, structured, and actionable.
+            CORE EXECUTION RULES (NO-EXCUSES AUTONOMY + SELF-HEALING):
+            1. Reply in the user's language (Bangla or English). Execute real tool calls directly until the goal is completely finished and verified.
+            2. NEVER say "I cannot draw/design CAD" or give fake placeholders:
+               - For ANY AutoCAD / floor plan / architectural / mechanical / 2D or 3D engineering drawing task, calculate exact real-world coordinates in Python (`python_exec`) if complex, then call `cad_generate_drawing` with detailed `entities_json` (`rect`, `line`, `circle`, `arc`, `polyline`, `dimension`, `text`, proper CAD layers) and optionally `extrude_height_3d`. Open the generated viewer URL in `browser_open_and_read` so the user sees the live blueprint immediately, and offer sharing the `.dxf`/`.stl` via `device_intent_action`!
+            3. SELF-HEALING ON ERRORS:
+               - If ANY tool fails, never give up or repeat the identical broken call: diagnose root cause, fix scripts/arguments, switch to an alternative strategy (e.g. `http_request` <-> `browser_open_and_read`, `shell_exec` <-> `python_exec`, UI element not found -> `scroll_to_text` + `wait_and_inspect`), and verify success.
+            4. HARDWARE-ADAPTIVE EXECUTION:
+               - Respect this Android phone's real hardware capacity below (${resources.deviceTierLabel} | Max Steps: ${resources.recommendedMaxAgentSteps}). For huge data, stream/chunk cleanly using files & Python scripts instead of bloating RAM.
+            5. APP & ONLINE AUTONOMY:
+               - Use `app_list` -> `app_launch` (or `app_install_store` if missing) -> `device_screen_inspect` + `device_virtual_hand`.
+            6. UNIVERSAL AUTO-SKILL ADAPTER:
+               - Whenever the user attaches a skill file/ZIP, gives a skill GitHub/URL, or pastes skill docs, call `skill_import_auto` immediately. When a task matches an imported skill below, call `skill_load(slug=..., query=...)` first and adapt its steps onto our Android tools.
+            7. OTP / CAPTCHA / 2FA LIVE SCREEN HANDOFF:
+               - Immediately call `request_human_intervention` (`target_mode` = 'BROWSER' or 'VIRTUAL_HANDS') when human verification appears, then continue seamlessly once resumed.
+            8. MEMORY CONTINUITY:
+               - Call `memory_save` proactively for key user workflows, CAD preferences, and project facts.$attachmentHint
 
-            Current Device State:
-            - Available RAM: ${resources.availableRamMb} MB / ${resources.totalPhysicalRamMb} MB (Pressure: ${resources.memoryPressureLabel})
-            - RAM Budget: ${settings.ramBudgetMb} MB | Max Concurrency: ${resources.effectiveConcurrency}
-            - Accessibility Virtual Hands: ${if (com.example.accessibility.PersonalAiAccessibilityService.isConnected.value) "CONNECTED" else "NOT ENABLED"}
+            Device Tier: ${resources.deviceTierLabel} | RAM: ${resources.availableRamMb}/${resources.totalPhysicalRamMb} MB (Budget: ${settings.ramBudgetMb} MB) | Workspace ROM: ${"%.1f".format(resources.virtualEnvUsedMb)}/${settings.storageQuotaMb} MB | Virtual Hands: ${if (com.example.accessibility.PersonalAiAccessibilityService.isConnected.value) "CONNECTED" else "NOT ENABLED"}
+            Imported Auto-Skills Index:
+            $importedSkillsIndex
 
-            Persistent Agent Memory:
+            Long-Term Agent Memory:
             $memoryContext
+
+            Recent Conversation & Task Continuity (Previous Chats):
+            $continuityContext
         """.trimIndent()
 
-        val conversation = mutableListOf(
-            AiMessage(role = "user", content = enrichedPrompt)
-        )
+        // Include recent session conversation turns (clean user/assistant context) + current user command
+        val conversation = mutableListOf<AiMessage>().apply {
+            addAll(sessionTurns.takeLast(8))
+            add(AiMessage(role = "user", content = enrichedPrompt))
+        }
+
         val complexity = classifyComplexity(enrichedPrompt)
         val declarations = toolRegistry.getDeclarations()
 
         var step = 1
         var totalTokens = 0
         var finalText = ""
+        val consecutiveToolFailures = mutableMapOf<String, Int>()
 
         try {
-            val maxIterations = if (settings.lowResourceMode) 5 else 10
+            val maxIterations = resources.recommendedMaxAgentSteps.coerceIn(10, 36)
             while (step <= maxIterations) {
                 waitWhilePaused()
 
                 _state.update {
                     it.copy(
                         taskStatus = TaskStatus.RUNNING,
-                        currentPhaseLabel = "Iteration $step: Selecting API model & planning...",
+                        currentPhaseLabel = "Step $step: Thinking & executing...",
                         streamingBuffer = ""
                     )
                 }
@@ -305,7 +351,8 @@ class AutonomousAgentEngine(
 
                 val completion = completionResult.getOrThrow()
                 totalTokens += completion.promptTokens + completion.completionTokens
-                _state.update { it.copy(activeModelLabel = "${completion.provider} • ${completion.model}") }
+                val slotTag = completion.keySlotLabel?.let { "$it • " }.orEmpty()
+                _state.update { it.copy(activeModelLabel = "${completion.provider} ($slotTag${completion.model})") }
 
                 if (completion.text.isNotBlank() && completion.toolCalls.isNotEmpty()) {
                     repository.appendLog(taskId, step, "PLAN", "Agent Plan", completion.text)
@@ -323,25 +370,26 @@ class AutonomousAgentEngine(
                     AiMessage(
                         role = "assistant",
                         content = completion.text,
-                        toolCalls = completion.toolCalls
+                        toolCalls = completion.toolCalls,
+                        rawAssistantPartsJson = completion.rawAssistantPartsJson
                     )
                 )
 
                 for (call in completion.toolCalls) {
                     waitWhilePaused()
                     _state.update {
-                        it.copy(currentPhaseLabel = "Executing tool: ${call.name}")
+                        it.copy(currentPhaseLabel = "Running: ${call.name}")
                     }
                     repository.appendLog(taskId, step, "TOOL_CALL", call.name, call.arguments.toString())
 
-                    val permReq = toolRegistry.evaluatePermission(call.name, call.arguments)
+                    val permReq = toolRegistry.evaluatePermission(call.name, call.arguments, settings.fullAutonomousMode)
                     val outcome = if (permReq != null && permReq.level == PermissionLevel.RESTRICTED) {
                         ToolExecutionOutcome(call.name, false, permReq.summary, verified = true)
                     } else if (permReq != null) {
                         _state.update {
                             it.copy(
                                 taskStatus = TaskStatus.WAITING_PERMISSION,
-                                currentPhaseLabel = "Waiting for user permission..."
+                                currentPhaseLabel = "Waiting for user approval..."
                             )
                         }
                         repository.appendLog(taskId, step, "PERMISSION", "Approval Requested", permReq.summary)
@@ -353,7 +401,7 @@ class AutonomousAgentEngine(
                             ToolExecutionOutcome(call.name, false, "User denied permission for ${call.name}.", verified = true)
                         }
                     } else {
-                        toolRegistry.execute(call.name, call.arguments, approvedLevel2 = false)
+                        toolRegistry.execute(call.name, call.arguments, approvedLevel2 = settings.fullAutonomousMode)
                     }
 
                     repository.appendLog(
@@ -366,11 +414,20 @@ class AutonomousAgentEngine(
                     )
                     appendFeed(
                         kind = if (outcome.success) FeedEntryKind.VERIFIED_TOOL_RESULT else FeedEntryKind.ERROR_NOTICE,
-                        title = "Verified Tool: ${call.name}",
+                        title = "Tool: ${call.name}",
                         body = outcome.output.take(1200)
                     )
 
                     var finalToolOutput = outcome.output
+                    if (!outcome.success) {
+                        val failCount = (consecutiveToolFailures[call.name] ?: 0) + 1
+                        consecutiveToolFailures[call.name] = failCount
+                        if (failCount >= 2) {
+                            finalToolOutput += "\n\n[SELF-HEALING RECOVERY DIRECTIVE]: '${call.name}' failed $failCount times consecutively. Diagnose root cause and switch strategy/arguments or use an alternate tool rather than repeating the exact same call."
+                        }
+                    } else {
+                        consecutiveToolFailures.remove(call.name)
+                    }
                     outcome.interventionRequest?.let { req ->
                         appendFeed(
                             kind = FeedEntryKind.HUMAN_INTERVENTION,
@@ -387,10 +444,11 @@ class AutonomousAgentEngine(
                         finalToolOutput = "${outcome.output}\n\n[HUMAN_INTERVENTION_RESOLVED]: $userResolution"
                     }
 
+                    val maxToolResultChars = if (call.name == "skill_load" || call.name == "file_read") 7600 else 3200
                     conversation.add(
                         AiMessage(
                             role = "tool",
-                            content = finalToolOutput.take(4000),
+                            content = finalToolOutput.take(maxToolResultChars),
                             toolCallId = call.id,
                             toolName = call.name
                         )
@@ -400,8 +458,15 @@ class AutonomousAgentEngine(
             }
 
             if (finalText.isBlank()) {
-                finalText = "Completed $step agent execution steps. Inspect verified tool logs for details."
+                finalText = "Completed $step autonomous steps. Check verified tool outputs above."
                 appendFeed(FeedEntryKind.AI_REASONING, "Execution Summary", finalText)
+            }
+
+            // Persist conversational turn into session memory & Room task summary
+            sessionTurns.add(AiMessage(role = "user", content = displayUserText.take(1200)))
+            sessionTurns.add(AiMessage(role = "assistant", content = finalText.take(1500)))
+            while (sessionTurns.size > 12) {
+                sessionTurns.removeAt(0)
             }
 
             repository.getTask(taskId)?.let {
@@ -413,6 +478,15 @@ class AutonomousAgentEngine(
                     )
                 )
             }
+            // Also mirror notable task outcome into permanent Agent Memory
+            if (displayUserText.length > 10) {
+                repository.saveMemory(
+                    category = MemoryCategory.TASK_HISTORY,
+                    key = "Task #$taskId: ${displayUserText.take(45)}",
+                    content = "Command: ${displayUserText.take(180)} | Outcome: ${finalText.take(260)}"
+                )
+            }
+
             _state.update {
                 it.copy(
                     isBusy = false,
@@ -478,9 +552,11 @@ class AutonomousAgentEngine(
     private fun classifyComplexity(prompt: String): TaskComplexity {
         val lower = prompt.lowercase()
         return when {
-            lower.contains("script") || lower.contains("python") || lower.contains("code") || lower.contains("html") -> TaskComplexity.CODING
-            lower.contains("job") || lower.contains("youtube") || lower.contains("research") || lower.contains("automate") || lower.contains("virtual hand") -> TaskComplexity.MULTISTEP_AGENT
-            lower.length > 160 -> TaskComplexity.REASONING
+            lower.contains("script") || lower.contains("python") || lower.contains("code") || lower.contains("html") ||
+                lower.contains("autocad") || lower.contains("dxf") || lower.contains("cad") || lower.contains("stl") -> TaskComplexity.CODING
+            lower.contains("job") || lower.contains("youtube") || lower.contains("research") || lower.contains("automate") ||
+                lower.contains("virtual hand") || lower.contains("app") || lower.contains("design") -> TaskComplexity.MULTISTEP_AGENT
+            lower.length > 180 -> TaskComplexity.REASONING
             else -> TaskComplexity.SIMPLE
         }
     }

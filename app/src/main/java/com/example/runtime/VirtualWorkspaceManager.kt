@@ -27,6 +27,7 @@ class VirtualWorkspaceManager(baseFilesDir: File) {
     val scriptsDir: File = File(rootDir, "scripts")
     val downloadsDir: File = File(rootDir, "downloads")
     val uploadsDir: File = File(rootDir, "uploads")
+    val skillsDir: File = File(rootDir, "skills")
     val tmpDir: File = File(rootDir, "tmp")
     val memoryDir: File = File(rootDir, "memory")
 
@@ -35,7 +36,7 @@ class VirtualWorkspaceManager(baseFilesDir: File) {
     }
 
     fun ensureStructure() {
-        listOf(rootDir, homeDir, workspaceDir, projectsDir, scriptsDir, downloadsDir, uploadsDir, tmpDir, memoryDir)
+        listOf(rootDir, homeDir, workspaceDir, projectsDir, scriptsDir, downloadsDir, uploadsDir, skillsDir, tmpDir, memoryDir)
             .forEach { if (!it.exists()) it.mkdirs() }
         seedStarterFilesIfNeeded()
     }
