@@ -218,7 +218,7 @@ class ToolRegistry(
         ),
         ToolDeclaration(
             name = "device_screen_inspect",
-            description = "Inspect current Android screen UI elements, coordinates, and screen size via Accessibility Virtual Hands.",
+            description = "Directly read current Android live screen UI elements across active windows and dialogs (no screenshots).",
             parametersSchema = schema(
                 props = mapOf("reason" to prop("string", "Optional brief reason for inspection")),
                 required = emptyList()
@@ -226,12 +226,13 @@ class ToolRegistry(
         ),
         ToolDeclaration(
             name = "device_virtual_hand",
-            description = "Control any Android screen via Virtual Hands: tap, double_tap, long_press, swipe, scroll_up, scroll_down, scroll_left, scroll_right, scroll_to_text, click_text, type, type_focused, press_enter, launch_app, open_url, back, home, recents, notifications, quick_settings, screenshot, wait_ms, wait_and_inspect.",
+            description = "Ultra-fast Virtual Hands control (no screenshots — auto-reads live screen after acting). Actions: tap, double_tap, long_press, swipe, scroll_up, scroll_down, scroll_left, scroll_right, scroll_to_text, click_text, type, type_focused, press_enter, launch_app, open_url, back, home, recents, notifications, quick_settings, wait_ms, wait_and_inspect, batch (runs multiple steps in 1 turn via 'steps' JSON array).",
             parametersSchema = schema(
                 props = mapOf(
-                    "action" to prop("string", "Action name"),
+                    "action" to prop("string", "Action name or 'batch'"),
                     "arg1" to prop("string", "X coord, text/viewId query, app name, URL, wait ms, or 'x1,y1'"),
-                    "arg2" to prop("string", "Y coord, text to type, or 'x2,y2'")
+                    "arg2" to prop("string", "Y coord, text to type, or 'x2,y2'"),
+                    "steps" to prop("string", "For action='batch': JSON array of {action, arg1, arg2} steps to run sequentially in one turn")
                 ),
                 required = listOf("action")
             )
@@ -249,12 +250,12 @@ class ToolRegistry(
         ),
         ToolDeclaration(
             name = "device_intent_action",
-            description = "Open Android Share sheet, Dialer, Email compose, or external URL intent.",
+            description = "Share workspace file (uploads/...) directly to an app (TikTok, WhatsApp, etc.), Share sheet, Dialer, Email compose, or external URL intent.",
             parametersSchema = schema(
                 props = mapOf(
-                    "action_type" to prop("string", "'share', 'dial', 'email', or 'url'"),
-                    "target" to prop("string", "Phone number, email, URL, or share subject"),
-                    "body" to prop("string", "Optional text body")
+                    "action_type" to prop("string", "'share_file', 'share', 'dial', 'email', or 'url'"),
+                    "target" to prop("string", "Relative file path for share_file (e.g. 'uploads/photo.jpg'), phone number, email, URL, or text"),
+                    "body" to prop("string", "For share_file: optional target app name/package (e.g. 'TikTok'); otherwise optional text body")
                 ),
                 required = listOf("action_type", "target")
             )
@@ -426,8 +427,10 @@ class ToolRegistry(
 
         val wantsWeb = listOf(
             "browser", "web", "http", "url", "search", "google", "site", "portal",
+            "gmail", "account", "signup", "sign up", "login", "sign in", "tiktok", "facebook", "instagram",
             "job", "apply", "remotive", "linkedin", "bdjobs", "html", "download", "server",
-            "ব্রাউজার", "ওয়েব", "সার্চ", "চাকরি", "জব", "এপ্লাই", "ডাউনলোড", "লিংক", "ওয়েবসাইট"
+            "ব্রাউজার", "ওয়েব", "সার্চ", "চাকরি", "জব", "এপ্লাই", "ডাউনলোড", "লিংক", "ওয়েবসাইট",
+            "অ্যাকাউন্ট", "জিমেইল", "লগইন", "সাইন আপ"
         ).any { lower.contains(it) }
         if (wantsWeb) {
             matchedDomainCount++
@@ -443,7 +446,9 @@ class ToolRegistry(
         val wantsVirtualHands = listOf(
             "virtual hand", "app", "screen", "tap", "swipe", "scroll", "otp", "captcha",
             "play store", "install", "launch", "share", "email", "dial", "call", "clipboard",
-            "অ্যাপ", "স্ক্রিন", "ইনস্টল", "শেয়ার", "ইমেইল", "ওটিপি", "ক্যাপচা", "কল"
+            "gmail", "account", "signup", "login", "tiktok", "facebook", "instagram", "youtube", "upload",
+            "অ্যাপ", "স্ক্রিন", "ইনস্টল", "শেয়ার", "ইমেইল", "ওটিপি", "ক্যাপচা", "কল",
+            "অ্যাকাউন্ট", "জিমেইল", "লগইন", "আপলোড", "ভিডিও", "ছবি", "পিকচার"
         ).any { lower.contains(it) }
         if (wantsVirtualHands) {
             matchedDomainCount++
@@ -685,8 +690,27 @@ class ToolRegistry(
             "browser_click" -> {
                 val target = args.optString("target")
                 val res = browser.clickElement(target)
-                delay(350)
-                ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "Click failed" })
+                if (res.isSuccess) delay(280)
+                val baseMsg = res.getOrElse { it.message ?: "Click failed" }
+                if (!res.isSuccess) {
+                    ToolExecutionOutcome(toolName, false, baseMsg)
+                } else {
+                    val snap = browser.extractCompactSummary()
+                    val fullMsg = if (snap == null) baseMsg else {
+                        "$baseMsg\n\n[LIVE PAGE UPDATE]\nTitle: ${snap.title}\nURL: ${snap.url}\nText: ${snap.textContent.take(1800)}\nForms: ${snap.formsSummary}"
+                    }
+                    val challenge = snap?.let { CommandSecurityGuard.detectHumanChallenge(it.textContent, it.url) }
+                    val intervention = challenge?.let { (cType, cReason) ->
+                        HumanInterventionRequest(
+                            challengeType = cType,
+                            reason = cReason,
+                            targetMode = "BROWSER",
+                            urlOrPackage = snap.url,
+                            instructionForUser = "উপরের লাইভ ব্রাউজার স্ক্রিনে $cType সল্ভ করে অথবা প্রয়োজনীয় তথ্য লিখে 'জমা দিন' চাপুন।"
+                        )
+                    }
+                    ToolExecutionOutcome(toolName, true, fullMsg, verified = true, interventionRequest = intervention)
+                }
             }
             "browser_fill" -> {
                 val field = args.optString("field")
@@ -697,8 +721,13 @@ class ToolRegistry(
             "browser_scroll" -> {
                 val dir = args.optString("direction", "down").lowercase()
                 val res = if (dir == "back") browser.goBack() else browser.scrollPage(dir)
-                delay(300)
-                ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "Browser scroll failed" })
+                if (res.isSuccess) delay(220)
+                val baseMsg = res.getOrElse { it.message ?: "Browser scroll failed" }
+                val snap = if (res.isSuccess) browser.extractCompactSummary() else null
+                val fullMsg = if (snap == null) baseMsg else {
+                    "$baseMsg\n\n[LIVE PAGE UPDATE]\nTitle: ${snap.title}\nURL: ${snap.url}\nText: ${snap.textContent.take(1600)}\nForms: ${snap.formsSummary}"
+                }
+                ToolExecutionOutcome(toolName, res.isSuccess, fullMsg)
             }
             "browser_eval_js" -> {
                 val script = args.optString("script")
@@ -723,62 +752,24 @@ class ToolRegistry(
             "app_launch" -> {
                 val query = args.optString("app_name_or_package")
                 val res = deviceController.launchApp(query)
-                if (res.isSuccess) delay(650)
-                ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "Launch failed" })
+                if (res.isSuccess) delay(420)
+                wrapActionWithLiveScreen(toolName, res)
             }
             "app_install_store" -> {
                 val query = args.optString("app_name_or_package")
                 val res = deviceController.openPlayStoreForApp(query)
-                if (res.isSuccess) delay(850)
-                ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "Play Store launch failed" })
+                if (res.isSuccess) delay(520)
+                wrapActionWithLiveScreen(toolName, res)
             }
             "device_screen_inspect" -> formatScreenInspectResult(toolName)
             "device_virtual_hand" -> {
-                val action = args.optString("action").lowercase()
-                val arg1 = args.optString("arg1")
-                val arg2 = args.optString("arg2")
-                if (action == "wait_ms") {
-                    val ms = (arg1.toLongOrNull() ?: 1000L).coerceIn(150L, 10_000L)
-                    delay(ms)
-                    return ToolExecutionOutcome(toolName, true, "Waited ${ms}ms", verified = true)
+                val action = args.optString("action").lowercase().trim()
+                val rawSteps = args.opt("steps")
+                if (action == "batch" || (rawSteps != null && rawSteps.toString().trim().startsWith("["))) {
+                    executeVirtualHandBatch(toolName, rawSteps)
+                } else {
+                    executeSingleVirtualHand(toolName, action, args.optString("arg1"), args.optString("arg2"))
                 }
-                if (action == "wait_and_inspect") {
-                    val ms = (arg1.toLongOrNull() ?: 900L).coerceIn(200L, 8_000L)
-                    delay(ms)
-                    return formatScreenInspectResult(toolName)
-                }
-                if (action == "scroll_to_text") {
-                    val res = deviceController.scrollToText(arg1)
-                    return ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "Not found" })
-                }
-                val res = when (action) {
-                    "tap" -> deviceController.tap(arg1.toFloatOrNull() ?: 500f, arg2.toFloatOrNull() ?: 500f)
-                    "double_tap" -> deviceController.doubleTap(arg1.toFloatOrNull() ?: 500f, arg2.toFloatOrNull() ?: 500f)
-                    "long_press" -> deviceController.longPress(arg1.toFloatOrNull() ?: 500f, arg2.toFloatOrNull() ?: 500f)
-                    "swipe" -> {
-                        val parts1 = arg1.split(",")
-                        val parts2 = arg2.split(",")
-                        val x1 = parts1.getOrNull(0)?.trim()?.toFloatOrNull() ?: 500f
-                        val y1 = parts1.getOrNull(1)?.trim()?.toFloatOrNull() ?: 1400f
-                        val x2 = parts2.getOrNull(0)?.trim()?.toFloatOrNull() ?: 500f
-                        val y2 = parts2.getOrNull(1)?.trim()?.toFloatOrNull() ?: 400f
-                        deviceController.swipe(x1, y1, x2, y2)
-                    }
-                    "scroll_down" -> deviceController.scroll("down")
-                    "scroll_up" -> deviceController.scroll("up")
-                    "scroll_left" -> deviceController.scroll("left")
-                    "scroll_right" -> deviceController.scroll("right")
-                    "click_text" -> deviceController.clickText(arg1)
-                    "type" -> deviceController.typeIntoField(arg1, arg2)
-                    "type_focused" -> deviceController.typeIntoField("", arg1.ifBlank { arg2 })
-                    "press_enter" -> deviceController.pressEnter()
-                    "launch_app" -> deviceController.launchApp(arg1)
-                    "open_url" -> deviceController.openExternalUrl(arg1)
-                    "back", "home", "recents", "notifications", "quick_settings", "screenshot" -> deviceController.globalNav(action)
-                    else -> Result.failure(IllegalArgumentException("Unsupported action: $action"))
-                }
-                if (res.isSuccess) delay(280)
-                ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "Gesture failed" })
             }
             "device_clipboard" -> {
                 val mode = args.optString("mode", "get").lowercase()
@@ -787,12 +778,18 @@ class ToolRegistry(
                 ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "Clipboard error" })
             }
             "device_intent_action" -> {
+                val actionType = args.optString("action_type")
                 val res = deviceController.sendShareOrIntent(
-                    args.optString("action_type"),
+                    actionType,
                     args.optString("target"),
                     args.optString("body")
                 )
-                ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "Intent failed" })
+                if (res.isSuccess && actionType.equals("share_file", ignoreCase = true)) {
+                    delay(450)
+                    wrapActionWithLiveScreen(toolName, res)
+                } else {
+                    ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "Intent failed" })
+                }
             }
             "request_human_intervention" -> {
                 val cType = args.optString("challenge_type", "Manual Verification")
@@ -1026,16 +1023,151 @@ class ToolRegistry(
         }
     }
 
+    private suspend fun executeSingleVirtualHand(
+        toolName: String,
+        action: String,
+        arg1: String,
+        arg2: String
+    ): ToolExecutionOutcome {
+        if (action == "screenshot") {
+            return ToolExecutionOutcome(
+                toolName,
+                false,
+                "Screenshot is disabled. Use direct live screen reading via device_screen_inspect instead."
+            )
+        }
+        if (action == "wait_ms") {
+            val ms = (arg1.toLongOrNull() ?: 450L).coerceIn(100L, 8_000L)
+            delay(ms)
+            return wrapActionWithLiveScreen(toolName, Result.success("Waited ${ms}ms"))
+        }
+        if (action == "wait_and_inspect") {
+            val ms = (arg1.toLongOrNull() ?: 400L).coerceIn(120L, 6_000L)
+            delay(ms)
+            return formatScreenInspectResult(toolName)
+        }
+        if (action == "scroll_to_text") {
+            val res = deviceController.scrollToText(arg1)
+            return wrapActionWithLiveScreen(toolName, res)
+        }
+        val res = dispatchVirtualHandStep(action, arg1, arg2)
+        if (res.isSuccess) {
+            delay(if (action == "launch_app" || action == "open_url") 380L else 180L)
+        }
+        return wrapActionWithLiveScreen(toolName, res)
+    }
+
+    private suspend fun executeVirtualHandBatch(toolName: String, rawSteps: Any?): ToolExecutionOutcome {
+        val arr = when (rawSteps) {
+            is JSONArray -> rawSteps
+            is String -> runCatching { JSONArray(rawSteps.trim()) }.getOrNull()
+            else -> null
+        } ?: return ToolExecutionOutcome(toolName, false, "Batch 'steps' must be a valid JSON array of {action, arg1, arg2}.")
+
+        if (arr.length() == 0) {
+            return ToolExecutionOutcome(toolName, false, "Batch 'steps' cannot be empty.")
+        }
+        val logs = mutableListOf<String>()
+        val maxSteps = arr.length().coerceAtMost(10)
+        for (i in 0 until maxSteps) {
+            val obj = arr.optJSONObject(i) ?: continue
+            val act = obj.optString("action").lowercase().trim()
+            val a1 = obj.optString("arg1")
+            val a2 = obj.optString("arg2")
+            if (act == "screenshot") {
+                return wrapActionWithLiveScreen(toolName, Result.failure(IllegalArgumentException("Step ${i + 1}: screenshot disabled")))
+            }
+            if (act == "wait_ms" || act == "wait_and_inspect") {
+                val ms = (a1.toLongOrNull() ?: 350L).coerceIn(100L, 5_000L)
+                delay(ms)
+                logs.add("${i + 1}. wait ${ms}ms")
+                continue
+            }
+            val stepRes = if (act == "scroll_to_text") {
+                deviceController.scrollToText(a1)
+            } else {
+                dispatchVirtualHandStep(act, a1, a2)
+            }
+            if (stepRes.isFailure) {
+                logs.add("${i + 1}. FAIL [$act]: ${stepRes.exceptionOrNull()?.message}")
+                val summary = "Batch stopped at step ${i + 1}/$maxSteps:\n" + logs.joinToString("\n")
+                return wrapActionWithLiveScreen(toolName, Result.failure(IllegalStateException(summary)))
+            }
+            logs.add("${i + 1}. OK: ${stepRes.getOrNull()}")
+            delay(if (act == "launch_app" || act == "open_url") 380L else 170L)
+        }
+        return wrapActionWithLiveScreen(
+            toolName,
+            Result.success("Batch completed ($maxSteps steps):\n" + logs.joinToString("\n"))
+        )
+    }
+
+    private fun dispatchVirtualHandStep(action: String, arg1: String, arg2: String): Result<String> {
+        return when (action) {
+            "tap" -> deviceController.tap(arg1.toFloatOrNull() ?: 500f, arg2.toFloatOrNull() ?: 500f)
+            "double_tap" -> deviceController.doubleTap(arg1.toFloatOrNull() ?: 500f, arg2.toFloatOrNull() ?: 500f)
+            "long_press" -> deviceController.longPress(arg1.toFloatOrNull() ?: 500f, arg2.toFloatOrNull() ?: 500f)
+            "swipe" -> {
+                val parts1 = arg1.split(",")
+                val parts2 = arg2.split(",")
+                val x1 = parts1.getOrNull(0)?.trim()?.toFloatOrNull() ?: 500f
+                val y1 = parts1.getOrNull(1)?.trim()?.toFloatOrNull() ?: 1400f
+                val x2 = parts2.getOrNull(0)?.trim()?.toFloatOrNull() ?: 500f
+                val y2 = parts2.getOrNull(1)?.trim()?.toFloatOrNull() ?: 400f
+                deviceController.swipe(x1, y1, x2, y2)
+            }
+            "scroll_down" -> deviceController.scroll("down")
+            "scroll_up" -> deviceController.scroll("up")
+            "scroll_left" -> deviceController.scroll("left")
+            "scroll_right" -> deviceController.scroll("right")
+            "click_text" -> deviceController.clickText(arg1)
+            "type" -> deviceController.typeIntoField(arg1, arg2)
+            "type_focused" -> deviceController.typeIntoField("", arg1.ifBlank { arg2 })
+            "press_enter" -> deviceController.pressEnter()
+            "launch_app" -> deviceController.launchApp(arg1)
+            "open_url" -> deviceController.openExternalUrl(arg1)
+            "back", "home", "recents", "notifications", "quick_settings" -> deviceController.globalNav(action)
+            else -> Result.failure(IllegalArgumentException("Unsupported action: $action"))
+        }
+    }
+
+    private fun wrapActionWithLiveScreen(toolName: String, res: Result<String>): ToolExecutionOutcome {
+        val actionMsg = res.getOrElse { it.message ?: "Action failed" }
+        val inspect = deviceController.inspectScreen()
+        if (inspect.isFailure) {
+            return ToolExecutionOutcome(toolName, res.isSuccess, actionMsg)
+        }
+        val nodes = inspect.getOrNull().orEmpty()
+        val pkg = deviceController.activePackage.value
+        val size = deviceController.getScreenSizeLabel()
+        val compactNodes = formatNodesCompact(nodes, size, pkg)
+        val combined = "$actionMsg\n\n[LIVE SCREEN UPDATE]\n$compactNodes"
+        val challenge = CommandSecurityGuard.detectHumanChallenge(compactNodes, pkg)
+        val intervention = challenge?.let { (cType, cReason) ->
+            HumanInterventionRequest(
+                challengeType = cType,
+                reason = cReason,
+                targetMode = "VIRTUAL_HANDS",
+                urlOrPackage = pkg,
+                instructionForUser = "$pkg অ্যাপে $cType দেখা গেছে। 'অ্যাপে যান' চেপে সল্ভ করুন বা নিচে তথ্য লিখে 'জমা দিন' চাপুন।"
+            )
+        }
+        return ToolExecutionOutcome(
+            toolName = toolName,
+            success = res.isSuccess,
+            output = combined,
+            verified = true,
+            interventionRequest = intervention
+        )
+    }
+
     private fun formatScreenInspectResult(toolName: String): ToolExecutionOutcome {
         val res = deviceController.inspectScreen()
         return res.fold(
             onSuccess = { nodes ->
                 val pkg = deviceController.activePackage.value
                 val size = deviceController.getScreenSizeLabel()
-                val text = if (nodes.isEmpty()) "Screen: $size | Active package: $pkg\nNo accessible nodes detected"
-                else "Screen: $size | Active package: $pkg\n" + nodes.joinToString("\n") { n ->
-                    "${n.className} text='${n.text}' desc='${n.contentDesc}' id='${n.viewId}' center=(${n.centerX.toInt()},${n.centerY.toInt()}) clickable=${n.clickable} editable=${n.editable}"
-                }
+                val text = formatNodesCompact(nodes, size, pkg)
                 val challenge = CommandSecurityGuard.detectHumanChallenge(text, pkg)
                 val intervention = challenge?.let { (cType, cReason) ->
                     HumanInterventionRequest(
@@ -1043,13 +1175,36 @@ class ToolRegistry(
                         reason = cReason,
                         targetMode = "VIRTUAL_HANDS",
                         urlOrPackage = pkg,
-                        instructionForUser = "$pkg অ্যাপে $cType দেখা গেছে। 'অ্যাপে যান' চেপে সল্ভ করুন, তারপর 'সল্ভ সম্পন্ন' চাপুন।"
+                        instructionForUser = "$pkg অ্যাপে $cType দেখা গেছে। 'অ্যাপে যান' চেপে সল্ভ করুন বা নিচে তথ্য লিখে 'জমা দিন' চাপুন।"
                     )
                 }
                 ToolExecutionOutcome(toolName, true, text, verified = true, interventionRequest = intervention)
             },
             onFailure = { ToolExecutionOutcome(toolName, false, it.message ?: "Accessibility unavailable") }
         )
+    }
+
+    private fun formatNodesCompact(
+        nodes: List<com.example.accessibility.ObservedUiNode>,
+        screenSize: String,
+        pkg: String
+    ): String {
+        if (nodes.isEmpty()) return "Screen: $screenSize | App: $pkg\nNo visible accessible nodes."
+        return "Screen: $screenSize | App: $pkg\n" + nodes.joinToString("\n") { n ->
+            buildString {
+                append(n.className)
+                if (n.text.isNotBlank()) append(" '${n.text}'")
+                if (n.contentDesc.isNotBlank() && n.contentDesc != n.text) append(" desc='${n.contentDesc}'")
+                if (n.viewId.isNotBlank()) append(" id=${n.viewId}")
+                append(" @(${n.centerX.toInt()},${n.centerY.toInt()})")
+                val flags = mutableListOf<String>()
+                if (n.clickable) flags.add("click")
+                if (n.editable) flags.add("edit")
+                if (n.scrollable) flags.add("scroll")
+                if (n.checked) flags.add("checked")
+                if (flags.isNotEmpty()) append(" [${flags.joinToString(",")}]")
+            }
+        }
     }
 
     private fun schema(props: Map<String, JSONObject>, required: List<String>): JSONObject {

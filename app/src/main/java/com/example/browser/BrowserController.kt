@@ -209,16 +209,22 @@ class BrowserController(
         val js = """
             (function() {
                 const q = $escaped;
+                const ql = q.toLowerCase();
                 let el = null;
                 try { el = document.querySelector(q); } catch(e) {}
                 if (!el) {
-                    const all = Array.from(document.querySelectorAll('a, button, input[type=submit], input[type=button], [role=button], span, div'));
-                    el = all.find(n => (n.innerText || n.value || n.getAttribute('aria-label') || '').trim().toLowerCase().includes(q.toLowerCase()));
+                    const all = Array.from(document.querySelectorAll('button, a, input[type=submit], input[type=button], [role=button], [role=menuitem], [role=option], label, span, div'));
+                    const matches = all.filter(n => {
+                        const txt = (n.innerText || n.value || n.getAttribute('aria-label') || '').trim().toLowerCase();
+                        return txt && txt.includes(ql);
+                    });
+                    matches.sort((a, b) => ((a.innerText||'').length - (b.innerText||'').length));
+                    el = matches[0] || null;
                 }
                 if (!el) return JSON.stringify({ok:false, msg:'Element not found: ' + q});
                 el.scrollIntoView({behavior:'instant', block:'center'});
                 el.click();
-                return JSON.stringify({ok:true, msg:'Clicked: ' + (el.innerText || el.value || el.tagName)});
+                return JSON.stringify({ok:true, msg:'Clicked: ' + (el.innerText || el.value || el.getAttribute('aria-label') || el.tagName).trim().slice(0,80)});
             })();
         """.trimIndent()
         val raw = evalJs(wv, js)
@@ -234,26 +240,48 @@ class BrowserController(
         val js = """
             (function() {
                 const q = $qEsc;
+                const ql = q.toLowerCase();
                 const val = $vEsc;
                 let el = null;
                 try { el = document.querySelector(q); } catch(e) {}
                 if (!el) {
                     const inputs = Array.from(document.querySelectorAll('input, textarea, select'));
-                    el = inputs.find(i => ((i.name||'') + ' ' + (i.id||'') + ' ' + (i.placeholder||'') + ' ' + (i.getAttribute('aria-label')||'')).toLowerCase().includes(q.toLowerCase()));
+                    el = inputs.find(i => {
+                        const meta = ((i.name||'') + ' ' + (i.id||'') + ' ' + (i.placeholder||'') + ' ' + (i.getAttribute('aria-label')||'') + ' ' + (i.type||'')).toLowerCase();
+                        return meta.includes(ql);
+                    });
                 }
                 if (!el) return 'Input field not found: ' + q;
-                if (el.type && el.type.toLowerCase() === 'password') return 'Blocked: Cannot auto-fill password fields.';
                 el.scrollIntoView({behavior:'instant', block:'center'});
                 el.focus();
-                el.value = val;
+                if (el.tagName === 'SELECT') {
+                    const opts = Array.from(el.options || []);
+                    const opt = opts.find(o => (o.value||'').toLowerCase() === val.toLowerCase() || (o.text||'').toLowerCase().includes(val.toLowerCase()));
+                    if (opt) el.value = opt.value;
+                    else el.value = val;
+                } else {
+                    const proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+                    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+                    if (setter) setter.call(el, val);
+                    else el.value = val;
+                }
                 el.dispatchEvent(new Event('input', {bubbles:true}));
                 el.dispatchEvent(new Event('change', {bubbles:true}));
-                return 'Filled field [' + (el.name || el.id || el.placeholder || el.tagName) + ']';
+                el.dispatchEvent(new Event('blur', {bubbles:true}));
+                const masked = (el.type && el.type.toLowerCase() === 'password') ? ' (password)' : '';
+                return 'Filled field [' + (el.name || el.id || el.placeholder || el.getAttribute('aria-label') || el.tagName) + ']' + masked;
             })();
         """.trimIndent()
         val raw = evalJs(wv, js)
         log("Fill '$selectorOrLabel' -> $raw")
         Result.success(raw ?: "Input updated")
+    }
+
+    suspend fun extractCompactSummary(): PageSnapshot? = withContext(Dispatchers.Main) {
+        val wv = webViewRef?.get() ?: return@withContext null
+        val snap = extractPageContentInternal(wv) ?: return@withContext null
+        _lastExtractedSnapshot.value = snap
+        snap
     }
 
     suspend fun scrollPage(direction: String): Result<String> = withContext(Dispatchers.Main) {

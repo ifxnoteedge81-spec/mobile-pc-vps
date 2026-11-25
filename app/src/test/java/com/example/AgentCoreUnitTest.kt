@@ -80,6 +80,8 @@ class AgentCoreUnitTest {
         assertEquals("enc_gemini_api_key_5", com.example.security.SecureKeyStore.SecretSlot.GEMINI_API_KEY_5.prefKey)
         assertTrue(com.example.agent.AgentSkillRegistry.skills.any { it.id == "vh_app_install" })
         assertTrue(com.example.agent.AgentSkillRegistry.skills.any { it.id == "github_api_skill" })
+        assertTrue(com.example.agent.AgentSkillRegistry.skills.any { it.id == "auto_account_creator" })
+        assertTrue(com.example.agent.AgentSkillRegistry.skills.any { it.id == "vh_fast_upload" })
     }
 
     @Test

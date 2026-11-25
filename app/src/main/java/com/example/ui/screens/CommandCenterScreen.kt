@@ -22,13 +22,16 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -118,7 +121,7 @@ import com.example.ui.theme.EmeraldPulse
 import com.example.ui.theme.NeuralCyan
 import com.example.ui.theme.VioletAccent
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun CommandCenterScreen(
     agentState: AgentRuntimeState,
@@ -245,7 +248,8 @@ fun CommandCenterScreen(
         else voiceStatus = "Microphone permission denied. Type your command below."
     }
 
-    LaunchedEffect(agentState.feed.size) {
+    val isImeVisible = WindowInsets.isImeVisible
+    LaunchedEffect(agentState.feed.size, isImeVisible) {
         if (agentState.feed.isNotEmpty()) {
             listState.animateScrollToItem(agentState.feed.lastIndex)
         }
@@ -307,29 +311,43 @@ fun CommandCenterScreen(
             }
 
             Spacer(Modifier.height(6.dp))
-            Row(
+            LazyRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                FilterChip(
-                    selected = showLiveScreen,
-                    onClick = { showLiveScreen = !showLiveScreen },
-                    leadingIcon = { Icon(Icons.Filled.Monitor, contentDescription = null, modifier = Modifier.size(16.dp)) },
-                    label = { Text(if (showLiveScreen) "লাইভ স্ক্রিন চালু" else "লাইভ স্ক্রিন") },
-                    modifier = Modifier.testTag("toggle_live_screen_chip")
-                )
-                AssistChip(
-                    onClick = { showSkillsSheet = true },
-                    leadingIcon = { Icon(Icons.Filled.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp)) },
-                    label = {
-                        Text(
-                            if (importedSkills.isEmpty()) "Skills & Auto-Import"
-                            else "Skills (${importedSkills.size} Auto)"
+                item {
+                    FilterChip(
+                        selected = showLiveScreen,
+                        onClick = { showLiveScreen = !showLiveScreen },
+                        leadingIcon = { Icon(Icons.Filled.Monitor, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                        label = { Text(if (showLiveScreen) "লাইভ স্ক্রিন চালু" else "লাইভ স্ক্রিন") },
+                        modifier = Modifier.testTag("toggle_live_screen_chip")
+                    )
+                }
+                item {
+                    AssistChip(
+                        onClick = { showSkillsSheet = true },
+                        leadingIcon = { Icon(Icons.Filled.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                        label = {
+                            Text(
+                                if (importedSkills.isEmpty()) "Skills & Auto-Import"
+                                else "Skills (${importedSkills.size} Auto)"
+                            )
+                        },
+                        modifier = Modifier.testTag("open_skills_sheet_chip")
+                    )
+                }
+                if (!accessibilityConnected) {
+                    item {
+                        AssistChip(
+                            onClick = onOpenAccessibilitySettings,
+                            leadingIcon = { Icon(Icons.Filled.TouchApp, contentDescription = null, modifier = Modifier.size(16.dp), tint = AmberWarning) },
+                            label = { Text("Virtual Hands চালু করুন") },
+                            modifier = Modifier.testTag("enable_virtual_hands_chip")
                         )
-                    },
-                    modifier = Modifier.testTag("open_skills_sheet_chip")
-                )
+                    }
+                }
             }
 
             if (agentState.isBusy && intervention == null) {
@@ -364,10 +382,11 @@ fun CommandCenterScreen(
             }
         }
 
-        // Embedded Live Screen Inside Agent Box (Auto-pops on OTP / CAPTCHA / Intervention)
-        AnimatedVisibility(visible = showLiveScreen || intervention != null) {
+        // Embedded Live Screen Inside Agent Box (Auto-pops on OTP / CAPTCHA / Account Input)
+        AnimatedVisibility(visible = (showLiveScreen && (!isImeVisible || intervention != null)) || intervention != null) {
             LiveScreenAgentPanel(
                 intervention = intervention,
+                isCompactForKeyboard = isImeVisible,
                 liveScreenMode = liveScreenMode,
                 onSelectMode = { liveScreenMode = it },
                 onClosePanel = { showLiveScreen = false },
@@ -880,6 +899,7 @@ fun CommandCenterScreen(
 @Composable
 private fun LiveScreenAgentPanel(
     intervention: com.example.agent.HumanInterventionRequest?,
+    isCompactForKeyboard: Boolean = false,
     liveScreenMode: String,
     onSelectMode: (String) -> Unit,
     onClosePanel: () -> Unit,
@@ -976,7 +996,7 @@ private fun LiveScreenAgentPanel(
                 OutlinedTextField(
                     value = interventionNote,
                     onValueChange = onInterventionNoteChange,
-                    placeholder = { Text("ঐচ্ছিক নোট/OTP হিন্ট লিখুন...") },
+                    placeholder = { Text("OTP, ফোন নম্বর, পাসওয়ার্ড বা নোট লিখুন...") },
                     singleLine = true,
                     modifier = Modifier.weight(1f)
                 )
@@ -985,7 +1005,7 @@ private fun LiveScreenAgentPanel(
                     colors = ButtonDefaults.buttonColors(containerColor = EmeraldPulse),
                     modifier = Modifier.testTag("resume_after_solve_button")
                 ) {
-                    Text("সল্ভ সম্পন্ন")
+                    Text("জমা দিন")
                 }
                 OutlinedButton(onClick = onStopAgent) {
                     Text("Stop")
@@ -1021,7 +1041,7 @@ private fun LiveScreenAgentPanel(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(230.dp)
+                    .height(if (isCompactForKeyboard) 125.dp else 230.dp)
                     .clip(RoundedCornerShape(10.dp))
                     .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp))
                     .background(MaterialTheme.colorScheme.surface)
@@ -1124,7 +1144,7 @@ private fun LiveScreenAgentPanel(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(140.dp)
+                    .height(if (isCompactForKeyboard) 85.dp else 140.dp)
                     .clip(RoundedCornerShape(8.dp))
                     .background(MaterialTheme.colorScheme.surfaceContainerLowest)
                     .padding(8.dp)

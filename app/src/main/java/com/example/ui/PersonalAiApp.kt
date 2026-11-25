@@ -2,12 +2,16 @@ package com.example.ui
 
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -68,7 +72,7 @@ import com.example.ui.screens.VirtualDesktopScreen
 import com.example.ui.theme.PersonalAiTheme
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun PersonalAiApp(
     viewModel: MainViewModel,
@@ -177,9 +181,10 @@ fun PersonalAiApp(
         ) {
             BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
                 val isWideScreen = maxWidth >= 700.dp
+                val isImeVisible = WindowInsets.isImeVisible
 
                 Scaffold(
-                    contentWindowInsets = WindowInsets.safeDrawing,
+                    contentWindowInsets = WindowInsets.systemBars,
                     snackbarHost = { SnackbarHost(snackbarHostState) },
                     topBar = {
                         TopAppBar(
@@ -206,7 +211,7 @@ fun PersonalAiApp(
                         )
                     },
                     bottomBar = {
-                        if (!isWideScreen) {
+                        if (!isWideScreen && !isImeVisible) {
                             NavigationBar {
                                 AppDestination.primaryDestinations.forEach { dest ->
                                     NavigationBarItem(
@@ -225,6 +230,8 @@ fun PersonalAiApp(
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(innerPadding)
+                            .consumeWindowInsets(innerPadding)
+                            .imePadding()
                     ) {
                         if (isWideScreen) {
                             NavigationRail {

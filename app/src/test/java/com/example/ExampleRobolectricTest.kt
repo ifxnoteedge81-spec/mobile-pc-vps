@@ -18,4 +18,15 @@ class ExampleRobolectricTest {
     val appName = context.getString(R.string.app_name)
     assertEquals("AI Computer", appName)
   }
+
+  @Test
+  fun `device automation disables screenshot and validates share_file paths`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val controller = com.example.accessibility.DeviceAutomationController(context)
+    val ss = controller.globalNav("screenshot")
+    assert(ss.isFailure)
+
+    val badShare = controller.sendShareOrIntent("share_file", "../../etc/passwd", "TikTok")
+    assert(badShare.isFailure)
+  }
 }

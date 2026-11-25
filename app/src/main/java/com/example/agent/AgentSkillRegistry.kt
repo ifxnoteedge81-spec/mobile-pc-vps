@@ -86,6 +86,20 @@ object AgentSkillRegistry {
             promptTemplate = "ব্রাউজার বা Virtual Hands ব্যবহার করে সাইট/অ্যাপে যাও। কোথাও OTP বা CAPTCHA এলে request_human_intervention কল করে লাইভ স্ক্রিন দেখাও, আমি সল্ভ করলে পরের ধাপ থেকে কাজ শেষ করো: "
         ),
         AgentSkill(
+            id = "auto_account_creator",
+            title = "অটোনমাস অ্যাকাউন্ট তৈরি (Gmail / Web / App)",
+            subtitle = "নিজে নিজে ফর্ম পূরণ, এবং ফোন নম্বর/OTP লাগলে লাইভ জিজ্ঞেস করে অ্যাকাউন্ট সম্পন্ন করা",
+            category = SkillCategory.VIRTUAL_HANDS,
+            promptTemplate = "লাইভ ব্রাউজার (https://accounts.google.com/signup) অথবা Virtual Hands ব্যবহার করে নিজে থেকে অ্যাকাউন্ট তৈরি শুরু করো। নাম, জন্মতারিখ, ইউজারনেম ও পাসওয়ার্ড পূরণ করো — এবং যেকোনো ধাপে ফোন নম্বর, OTP বা CAPTCHA চাইলে request_human_intervention কল করে আমার কাছে চাও এবং তা বসিয়ে অ্যাকাউন্ট সম্পন্ন করো: "
+        ),
+        AgentSkill(
+            id = "vh_fast_upload",
+            title = "সুপার ফাস্ট মিডিয়া আপলোড (TikTok / Social)",
+            subtitle = "আপলোডকৃত ছবি/ভিডিও ১-ট্যাপে অ্যাপে পাঠিয়ে batch Virtual Hands দিয়ে পোস্ট",
+            category = SkillCategory.VIRTUAL_HANDS,
+            promptTemplate = "আমার আপলোড করা ছবি/ভিডিওটি device_intent_action(action_type='share_file') বা app_launch ও batch Virtual Hands দিয়ে দ্রুত পোস্ট/আপলোড করো (কোনো স্ক্রিনশট নেবে না, সরাসরি স্ক্রিন রিড করবে): "
+        ),
+        AgentSkill(
             id = "web_research",
             title = "ওয়েব রিসার্চ ও অটোমেশন",
             subtitle = "লাইভ ব্রাউজারে ফর্ম ফিল, ক্লিক, স্ক্রল ও রিপোর্ট তৈরি",

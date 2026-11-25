@@ -361,30 +361,34 @@ class AutonomousAgentEngine(
             • Code & Terminal: Linux shell (`shell_exec`), Python 3 (`python_exec`), V8 JS/TS (`js_exec`), multi-file search (`workspace_grep`), file I/O (`file_list`, `file_read`, `file_write`, `file_delete`), local HTTP server (`local_server_control`).
             • CAD & Engineering Design: `cad_generate_drawing` creates real AutoCAD ASCII DXF (`.dxf`), dimensioned SVG Blueprints (`.svg`), interactive pan/zoom HTML viewers (`_viewer.html`), AND 3D CAD `.stl` meshes for ANY architectural floor plan, mechanical bracket, gear, PCB, civil drawing, or custom geometry!
             • Web & Research: Fast HTTPS (`http_request`) + Live Chromium Browser (`browser_open_and_read`, `browser_click`, `browser_fill`, `browser_scroll`, `browser_eval_js`, `browser_download`).
-            • Full Phone Virtual Hands: `app_list`, `app_launch`, `app_install_store`, `device_screen_inspect`, `device_virtual_hand`, `device_clipboard`, `device_intent_action`.
+            • Full Phone Virtual Hands (NO Screenshots — Direct Live Screen Reading): `app_list`, `app_launch`, `app_install_store`, `device_screen_inspect`, `device_virtual_hand` (supports `action="batch"` with `steps` JSON array to run 2-10 UI actions in ONE turn, and EVERY UI action automatically returns the updated live screen elements!), `device_clipboard`, `device_intent_action` (`share_file` directly sends `uploads/...` photos/videos into TikTok/WhatsApp/etc. in 1 tap!).
             • Universal Auto-Skill Adapter: `skill_import_auto`, `skill_list`, `skill_load`, `skill_delete` (absorbs any Anthropic/OpenClaw/MCP/Gemini/ZIP/10,000+ line skill automatically).
             • Hardware & Memory: `system_hardware_status`, `memory_read`, `memory_save`, `schedule_automation`.
 
-            CORE EXECUTION RULES (NO-EXCUSES AUTONOMY + SELF-HEALING):
+            CORE EXECUTION RULES (ULTRA-FAST AUTONOMY + DIRECT SCREEN READING):
             1. Reply in the user's language (Bangla or English). Execute real tool calls directly until the goal is completely finished and verified.
             2. DOCUMENT & PDF READING:
-               - For ANY `.pdf`, `.docx`, `.txt`, `.csv`, or `.json` file (such as a CV/Resume in `uploads/`), call `file_read(path="uploads/...")` directly — `file_read` has a built-in PDF/DOCX text extractor! Or in Python use `extract_pdf_text("uploads/...")` / `PdfReader(...)`. Never run raw binary decoding scripts first.
-            3. CV-TO-JOB SEARCH & APPLICATION WORKFLOW:
-               - Extract candidate skills, roles, location, contact info, and experience from the CV -> search real active job boards via `browser_open_and_read` (e.g., query or direct public APIs like `https://remotive.com/api/remote-jobs?search=...`, `https://www.arbeitnow.com/api/job-board-api`, `bdjobs.com`, `linkedin.com/jobs`) -> pick matching openings -> open application page in Live Browser -> fill fields using `browser_fill` / `browser_click` -> pause with `request_human_intervention` whenever CAPTCHA, login/OTP, or final application review/submission requires the user.
-            4. NEVER say "I cannot draw/design CAD" or give fake placeholders:
-               - For ANY AutoCAD / floor plan / architectural / mechanical / 2D or 3D engineering drawing task, calculate exact real-world coordinates in Python (`python_exec`) if complex, then call `cad_generate_drawing` with detailed `entities_json` (`rect`, `line`, `circle`, `arc`, `polyline`, `dimension`, `text`, proper CAD layers) and optionally `extrude_height_3d`. Open the generated viewer URL in `browser_open_and_read` so the user sees the live blueprint immediately, and offer sharing the `.dxf`/`.stl` via `device_intent_action`!
-            5. SELF-HEALING ON ERRORS:
-               - If ANY tool fails, never give up or repeat the identical broken call: diagnose root cause, fix scripts/arguments, switch to an alternative strategy (e.g. `http_request` <-> `browser_open_and_read`, `shell_exec` <-> `python_exec` <-> `file_read`, UI element not found -> `scroll_to_text` + `wait_and_inspect`), and verify success.
-            6. HARDWARE-ADAPTIVE EXECUTION:
-               - Respect this Android phone's real hardware capacity below (${resources.deviceTierLabel} | Max Steps: ${resources.recommendedMaxAgentSteps}). For huge data, stream/chunk cleanly using files & Python scripts instead of bloating RAM.
-            7. APP & ONLINE AUTONOMY:
-               - Use `app_list` -> `app_launch` (or `app_install_store` if missing) -> `device_screen_inspect` + `device_virtual_hand`.
-            8. UNIVERSAL AUTO-SKILL ADAPTER:
-               - Whenever the user attaches a skill file/ZIP, gives a skill GitHub/URL, or pastes skill docs, call `skill_import_auto` immediately. When a task matches an imported skill below, call `skill_load(slug=..., query=...)` first and adapt its steps onto our Android tools.
-            9. OTP / CAPTCHA / 2FA LIVE SCREEN HANDOFF:
-               - Immediately call `request_human_intervention` (`target_mode` = 'BROWSER' or 'VIRTUAL_HANDS') when human verification appears, then continue seamlessly once resumed.
+               - For ANY `.pdf`, `.docx`, `.txt`, `.csv`, or `.json` file (such as a CV/Resume in `uploads/`), call `file_read(path="uploads/...")` directly — `file_read` has a built-in PDF/DOCX text extractor! Or in Python use `extract_pdf_text("uploads/...")`.
+            3. ULTRA-FAST VIRTUAL HANDS (TARGET 1-2 MIN MAX, NEVER TAKE SCREENSHOTS):
+               - NEVER take screenshots (`screenshot` is disabled). Read the live screen UI hierarchy directly (`device_screen_inspect`, or read `[LIVE SCREEN UPDATE]` returned automatically after every Virtual Hand / `app_launch` action!).
+               - When filling multiple fields or tapping predictable sequences (e.g., typing name + tapping Next, or Next -> Next -> Caption -> Post), ALWAYS combine them using `device_virtual_hand(action="batch", steps="[...]")` so 3-8 UI actions finish in ONE single turn!
+               - When uploading an attached photo/video from `uploads/` to TikTok, Instagram, Facebook, or another app: first try `device_intent_action(action_type="share_file", target="uploads/...", body="<AppName>")` to jump straight into that app's Share/Upload composer in 1 step, then batch-tap Next/Post via `device_virtual_hand`!
+            4. AUTONOMOUS ACCOUNT CREATION & LOGIN (GMAIL / GOOGLE / WEB / APPS):
+               - If asked to create an account (e.g., Gmail/Google account -> `browser_open_and_read("https://accounts.google.com/signup")` OR Settings/Gmail app via Virtual Hands) or log in anywhere:
+               - Inspect fields and fill Name, Birthday, Gender, Username, Password directly (`browser_fill` or `device_virtual_hand` `type` / `batch`, including password fields when requested by user).
+               - Whenever Phone Number, SMS OTP, CAPTCHA, or personal verification info is needed from the user, IMMEDIATELY call `request_human_intervention` (`target_mode="BROWSER"` or `"VIRTUAL_HANDS"`) with a clear question in `instruction_for_user` telling the user what to type in the Live Screen input box (e.g., phone number or OTP) or solve on screen and tap 'জমা দিন'. Once resumed, read `[HUMAN_INTERVENTION_RESOLVED]: ...`, enter that value immediately, and finish creating the account!
+            5. CV-TO-JOB SEARCH & APPLICATION WORKFLOW:
+               - Extract candidate skills/experience from CV -> search live jobs via `browser_open_and_read` -> fill applications -> call `request_human_intervention` for CAPTCHA/OTP/final submission.
+            6. NEVER say "I cannot draw/design CAD":
+               - For ANY AutoCAD / floor plan / mechanical / 2D or 3D engineering drawing task, call `cad_generate_drawing` with exact coordinates and open the live blueprint viewer URL.
+            7. SELF-HEALING ON ERRORS:
+               - If any tool fails, immediately diagnose and switch strategy (`scroll_to_text`, coordinate `tap`, `browser_eval_js`, `http_request` <-> `browser_open_and_read`).
+            8. HARDWARE-ADAPTIVE EXECUTION:
+               - Respect this Android phone's real hardware capacity below (${resources.deviceTierLabel} | Max Steps: ${resources.recommendedMaxAgentSteps}).
+            9. UNIVERSAL AUTO-SKILL ADAPTER:
+               - Absorb skill files/URLs with `skill_import_auto` and load matching imported skills via `skill_load`.
             10. MEMORY CONTINUITY:
-               - Call `memory_save` proactively for key user workflows, CV profile highlights, CAD preferences, and project facts.$attachmentHint
+               - Call `memory_save` for user preferences & project facts (never save passwords/OTPs).$attachmentHint
 
             Device Tier: ${resources.deviceTierLabel} | RAM: ${resources.availableRamMb}/${resources.totalPhysicalRamMb} MB (Budget: ${settings.ramBudgetMb} MB) | Workspace ROM: ${"%.1f".format(resources.virtualEnvUsedMb)}/${settings.storageQuotaMb} MB | Virtual Hands: ${if (com.example.accessibility.PersonalAiAccessibilityService.isConnected.value) "CONNECTED" else "NOT ENABLED"}
             Imported Auto-Skills Index:
@@ -428,12 +432,14 @@ class AutonomousAgentEngine(
                     )
                 }
 
+                val useFastTurn = complexity == TaskComplexity.SIMPLE || complexity == TaskComplexity.MULTISTEP_AGENT
                 val completionResult = router.complete(
                     settings = settings,
                     complexity = complexity,
                     systemPrompt = systemPrompt,
                     messages = conversation,
                     tools = declarations,
+                    fastMode = useFastTurn,
                     onStreamChunk = { chunk ->
                         _state.update { cur -> cur.copy(streamingBuffer = cur.streamingBuffer + chunk) }
                     }
@@ -710,7 +716,9 @@ class AutonomousAgentEngine(
             lower.contains("script") || lower.contains("python") || lower.contains("code") || lower.contains("html") ||
                 lower.contains("autocad") || lower.contains("dxf") || lower.contains("cad") || lower.contains("stl") -> TaskComplexity.CODING
             lower.contains("job") || lower.contains("youtube") || lower.contains("research") || lower.contains("automate") ||
-                lower.contains("virtual hand") || lower.contains("app") || lower.contains("design") -> TaskComplexity.MULTISTEP_AGENT
+                lower.contains("virtual hand") || lower.contains("app") || lower.contains("design") ||
+                lower.contains("gmail") || lower.contains("account") || lower.contains("tiktok") || lower.contains("upload") ||
+                lower.contains("জিমেইল") || lower.contains("অ্যাকাউন্ট") || lower.contains("আপলোড") -> TaskComplexity.MULTISTEP_AGENT
             lower.length > 180 -> TaskComplexity.REASONING
             else -> TaskComplexity.SIMPLE
         }

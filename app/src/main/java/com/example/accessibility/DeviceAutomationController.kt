@@ -100,7 +100,7 @@ class DeviceAutomationController(private val context: Context) {
                 return Result.success("Found '$query' at (${match.centerX.toInt()},${match.centerY.toInt()}) after $attempt scroll(s)")
             }
             svc.performDirectionalScroll("down")
-            delay(500)
+            delay(260)
         }
         return Result.failure(IllegalStateException("Text '$query' not found after scrolling $maxScrolls times"))
     }
@@ -136,7 +136,6 @@ class DeviceAutomationController(private val context: Context) {
             "recents" -> svc.performSystemRecents()
             "notifications" -> svc.performSystemNotifications()
             "quick_settings" -> svc.performSystemQuickSettings()
-            "screenshot" -> svc.performSystemScreenshot()
             else -> false
         }
         return if (ok) Result.success("Performed global action: $action")
@@ -231,7 +230,54 @@ class DeviceAutomationController(private val context: Context) {
     }
 
     fun sendShareOrIntent(actionType: String, target: String, body: String = ""): Result<String> = runCatching {
-        val intent = when (actionType.lowercase()) {
+        val typeLower = actionType.lowercase().trim()
+        val intent = when (typeLower) {
+            "share_file" -> {
+                val baseDir = java.io.File(context.filesDir, "virtual_env").canonicalFile
+                val relClean = target.trim().trimStart('/')
+                val file = java.io.File(baseDir, relClean).canonicalFile
+                require(file.path.startsWith(baseDir.path) && file.exists() && file.isFile) {
+                    "Workspace file not found: $target"
+                }
+                val uri = androidx.core.content.FileProvider.getUriForFile(
+                    context,
+                    "${context.packageName}.fileprovider",
+                    file
+                )
+                val mime = android.webkit.MimeTypeMap.getSingleton()
+                    .getMimeTypeFromExtension(file.extension.lowercase())
+                    ?: when (file.extension.lowercase()) {
+                        "jpg", "jpeg" -> "image/jpeg"
+                        "png" -> "image/png"
+                        "webp" -> "image/webp"
+                        "mp4" -> "video/mp4"
+                        "pdf" -> "application/pdf"
+                        else -> "*/*"
+                    }
+                val send = Intent(Intent.ACTION_SEND).apply {
+                    type = mime
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                val targetHint = body.trim()
+                val matchedPkg = if (targetHint.isNotBlank()) {
+                    listLaunchableApps().firstOrNull {
+                        it.packageName.equals(targetHint, ignoreCase = true) ||
+                            it.appName.contains(targetHint, ignoreCase = true) ||
+                            it.packageName.contains(targetHint, ignoreCase = true)
+                    }?.packageName
+                } else null
+                if (!matchedPkg.isNullOrBlank()) {
+                    send.setPackage(matchedPkg)
+                    send.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    send
+                } else {
+                    if (targetHint.isNotBlank()) send.putExtra(Intent.EXTRA_TEXT, targetHint)
+                    Intent.createChooser(send, "Share ${file.name}").apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                }
+            }
             "share" -> Intent.createChooser(
                 Intent(Intent.ACTION_SEND).apply {
                     type = "text/plain"
@@ -249,7 +295,7 @@ class DeviceAutomationController(private val context: Context) {
             "url" -> Intent(Intent.ACTION_VIEW, Uri.parse(target.trim())).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            else -> error("Unsupported intent action '$actionType'. Use: share, dial, email, url")
+            else -> error("Unsupported intent action '$actionType'. Use: share_file, share, dial, email, url")
         }
         context.startActivity(intent)
         "Dispatched Android $actionType intent for '$target'"
