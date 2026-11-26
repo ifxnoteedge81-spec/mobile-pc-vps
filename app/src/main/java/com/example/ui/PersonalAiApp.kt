@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.padding
@@ -69,6 +70,7 @@ import com.example.ui.screens.ResourceManagerScreen
 import com.example.ui.screens.TaskHistoryScreen
 import com.example.ui.screens.TerminalScreen
 import com.example.ui.screens.VirtualDesktopScreen
+import com.example.ui.screens.WhatsAppBotScreen
 import com.example.ui.theme.PersonalAiTheme
 import kotlinx.coroutines.launch
 
@@ -112,7 +114,15 @@ fun PersonalAiApp(
     val isFetchingModels by viewModel.isFetchingModels.collectAsStateWithLifecycle()
     val providerUsage by viewModel.providerUsage.collectAsStateWithLifecycle()
     val importedSkills by viewModel.importedSkills.collectAsStateWithLifecycle()
+    val skillImportProgress by viewModel.skillImportProgress.collectAsStateWithLifecycle()
+    val whatsAppChats by viewModel.whatsAppChats.collectAsStateWithLifecycle()
+    val whatsAppActivity by viewModel.whatsAppActivity.collectAsStateWithLifecycle()
+    val whatsAppState by viewModel.whatsAppState.collectAsStateWithLifecycle()
+    val whatsAppLinkStatus by viewModel.whatsAppLinkStatus.collectAsStateWithLifecycle()
+    val whatsAppPairingCode by viewModel.whatsAppPairingCode.collectAsStateWithLifecycle()
     val statusBanner by viewModel.statusBanner.collectAsStateWithLifecycle()
+    val availableUpdate by viewModel.availableUpdate.collectAsStateWithLifecycle()
+    val isCheckingUpdate by viewModel.isCheckingUpdate.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
     val navController = rememberNavController()
@@ -247,11 +257,42 @@ fun PersonalAiApp(
                             Spacer(Modifier.width(4.dp))
                         }
 
-                        NavHost(
-                            navController = navController,
-                            startDestination = AppDestination.Home.route,
-                            modifier = Modifier.weight(1f)
-                        ) {
+                        Column(modifier = Modifier.weight(1f).fillMaxSize()) {
+                            availableUpdate?.takeIf { it.isUpdateAvailable }?.let { update ->
+                                androidx.compose.material3.Surface(
+                                    color = MaterialTheme.colorScheme.primaryContainer,
+                                    tonalElevation = 2.dp
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                                        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = "নতুন আপডেট (${update.latestVersion}) — আনইনস্টল ছাড়াই আপডেট করুন",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        androidx.compose.material3.TextButton(
+                                            onClick = { viewModel.launchInPlaceUpdate(update.downloadUrl) },
+                                            modifier = Modifier.testTag("banner_in_place_update_button")
+                                        ) {
+                                            Text("Update")
+                                        }
+                                        androidx.compose.material3.TextButton(onClick = viewModel::dismissUpdateNotice) {
+                                            Text("Later")
+                                        }
+                                    }
+                                }
+                            }
+                            NavHost(
+                                navController = navController,
+                                startDestination = AppDestination.Home.route,
+                                modifier = Modifier.weight(1f)
+                            ) {
                             composable(AppDestination.Home.route) {
                                 DashboardScreen(
                                     settings = settings,
@@ -277,6 +318,7 @@ fun PersonalAiApp(
                                         viewModel.hasSecret(SecretSlot.OPENROUTER_API_KEY),
                                     pendingAttachments = pendingAttachments,
                                     importedSkills = importedSkills,
+                                    skillImportProgress = skillImportProgress,
                                     browserController = viewModel.browserController,
                                     browserTabs = browserTabs,
                                     activeTabId = activeTabId,
@@ -291,6 +333,8 @@ fun PersonalAiApp(
                                     onImportSkillSource = { src -> viewModel.importSkillFromSource(src) },
                                     onToggleImportedSkill = viewModel::toggleImportedSkill,
                                     onDeleteImportedSkill = viewModel::deleteImportedSkill,
+                                    onClearAllImportedSkills = viewModel::clearAllImportedSkills,
+                                    onSearchSkillsLocal = { q -> viewModel.searchImportedSkillsLocal(q, importedSkills) },
                                     onSendCommand = viewModel::sendAgentCommand,
                                     onPause = viewModel::pauseAgent,
                                     onResume = viewModel::resumeAgent,
@@ -302,6 +346,32 @@ fun PersonalAiApp(
                                     onInspectDeviceScreen = viewModel::inspectDeviceScreen,
                                     onQuickVirtualHand = { act -> viewModel.testVirtualHandGesture(act) },
                                     onClearFeed = viewModel::clearAgentFeed,
+                                    onOpenModelSettings = { navigateTo(AppDestination.AiModelSettings) }
+                                )
+                            }
+                            composable(AppDestination.WhatsAppBot.route) {
+                                WhatsAppBotScreen(
+                                    settings = settings,
+                                    waState = whatsAppState,
+                                    linkStatus = whatsAppLinkStatus,
+                                    pairingCode = whatsAppPairingCode,
+                                    activeModelLabel = viewModel.getActiveModelLabel(),
+                                    hasAnyApiKey = viewModel.hasAnyGeminiKey() ||
+                                        viewModel.hasSecret(SecretSlot.OPENROUTER_API_KEY),
+                                    chats = whatsAppChats,
+                                    activityLogs = whatsAppActivity,
+                                    webBridge = viewModel.whatsAppWebBridge,
+                                    observeChatMessages = viewModel::observeWhatsAppChatMessages,
+                                    onRefreshStatus = viewModel::refreshWhatsAppStatus,
+                                    onToggleMaster = viewModel::toggleWhatsAppBotMaster,
+                                    onSaveGlobalRules = viewModel::updateWhatsAppGlobalRules,
+                                    onRequestPhoneLinkCode = viewModel::requestWhatsAppPhoneLinkCode,
+                                    onSyncChats = viewModel::syncWhatsAppChats,
+                                    onReloadWeb = viewModel::reloadWhatsAppWeb,
+                                    onOpenNotificationSettings = viewModel::openWhatsAppNotificationSettings,
+                                    onSendMessage = viewModel::sendWhatsAppMessage,
+                                    onUpdateChatRules = viewModel::updateWhatsAppChatRules,
+                                    onDeleteChat = viewModel::deleteWhatsAppChatRecord,
                                     onOpenModelSettings = { navigateTo(AppDestination.AiModelSettings) }
                                 )
                             }
@@ -446,8 +516,15 @@ fun PersonalAiApp(
                                 )
                             }
                             composable(AppDestination.About.route) {
-                                AboutApplicationScreen()
+                                AboutApplicationScreen(
+                                    installedIdentity = viewModel.installedAppIdentity,
+                                    availableUpdate = availableUpdate,
+                                    isCheckingUpdate = isCheckingUpdate,
+                                    onCheckForUpdate = { viewModel.checkForAppUpdate(silent = false) },
+                                    onDownloadInPlaceUpdate = viewModel::launchInPlaceUpdate
+                                )
                             }
+                        }
                         }
                     }
                 }

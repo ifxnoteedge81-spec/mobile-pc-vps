@@ -16,8 +16,13 @@ android {
     applicationId = "com.aistudio.aicomputer.k9m4vx"
     minSdk = 24
     targetSdk = 36
-    versionCode = (project.findProperty("ciVersionCode") as String?)?.toIntOrNull()?.coerceAtLeast(1) ?: 1
-    versionName = (project.findProperty("ciVersionName") as String?)?.takeIf { it.isNotBlank() } ?: "1.0.0"
+    val fallbackEpochVersionCode = ((System.currentTimeMillis() / 1000L - 1700000000L) / 10L)
+      .toInt()
+      .coerceAtLeast(100)
+    versionCode = (project.findProperty("ciVersionCode") as String?)?.toIntOrNull()?.coerceAtLeast(1)
+      ?: fallbackEpochVersionCode
+    versionName = (project.findProperty("ciVersionName") as String?)?.takeIf { it.isNotBlank() }
+      ?: "1.0.$fallbackEpochVersionCode"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

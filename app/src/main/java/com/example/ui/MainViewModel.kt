@@ -34,7 +34,12 @@ import com.example.storage.ExecutionLogEntity
 import com.example.storage.ImportedSkillEntity
 import com.example.storage.PowerProfile
 import com.example.storage.ProviderUsageEntity
+import com.example.storage.WhatsAppChatEntity
+import com.example.storage.WhatsAppMessageEntity
 import com.example.ui.theme.ThemeMode
+import com.example.whatsapp.WaLinkStatus
+import com.example.whatsapp.WaRuntimeState
+import com.example.whatsapp.WhatsAppNotificationService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -84,6 +89,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val importedSkills: StateFlow<List<ImportedSkillEntity>> = container.repository.importedSkills
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    private val _skillImportProgress = MutableStateFlow<String?>(null)
+    val skillImportProgress: StateFlow<String?> = _skillImportProgress.asStateFlow()
+    val whatsAppChats: StateFlow<List<WhatsAppChatEntity>> = container.repository.whatsAppChats
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val whatsAppActivity: StateFlow<List<WhatsAppMessageEntity>> = container.repository.whatsAppActivity
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val whatsAppState: StateFlow<WaRuntimeState> = container.whatsAppBotEngine.state
+    val whatsAppLinkStatus: StateFlow<WaLinkStatus> = container.whatsAppWebBridge.linkStatus
+    val whatsAppPairingCode: StateFlow<String> = container.whatsAppWebBridge.pairingCode
 
     // File Manager & Code Editor state
     private val _currentBrowsePath = MutableStateFlow("")
@@ -131,8 +145,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _statusBanner = MutableStateFlow<String?>(null)
     val statusBanner: StateFlow<String?> = _statusBanner.asStateFlow()
 
+    val installedAppIdentity: com.example.runtime.InstalledAppIdentity =
+        container.updateChecker.getInstalledIdentity()
+
+    private val _availableUpdate = MutableStateFlow<com.example.runtime.AppUpdateInfo?>(null)
+    val availableUpdate: StateFlow<com.example.runtime.AppUpdateInfo?> = _availableUpdate.asStateFlow()
+
+    private val _isCheckingUpdate = MutableStateFlow(false)
+    val isCheckingUpdate: StateFlow<Boolean> = _isCheckingUpdate.asStateFlow()
+
     val browserController get() = container.browserController
     val deviceController get() = container.deviceController
+    val whatsAppWebBridge get() = container.whatsAppWebBridge
     val ramBudgetPresets get() = container.resourceManager.presetRamBudgetsMb
     val storageQuotaPresets get() = container.resourceManager.presetStorageQuotasMb
 
@@ -151,6 +175,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         refreshFiles()
+        checkForAppUpdate(silent = true)
+    }
+
+    fun checkForAppUpdate(silent: Boolean = false) {
+        if (_isCheckingUpdate.value) return
+        viewModelScope.launch {
+            _isCheckingUpdate.value = true
+            container.updateChecker.checkLatestRelease().fold(
+                onSuccess = { info ->
+                    if (info.isUpdateAvailable) {
+                        _availableUpdate.value = info
+                        if (!silent) {
+                            showBanner("নতুন আপডেট (${info.latestVersion}) পাওয়া গেছে — আনইনস্টল ছাড়াই ইন-প্লেস আপডেট করুন।")
+                        }
+                    } else if (!silent) {
+                        _availableUpdate.value = null
+                        showBanner("আপনি সর্বশেষ ভার্সন (${installedAppIdentity.versionName}) ব্যবহার করছেন।")
+                    }
+                },
+                onFailure = { err ->
+                    if (!silent) {
+                        showBanner("আপডেট চেক ব্যর্থ: ${err.message}")
+                    }
+                }
+            )
+            _isCheckingUpdate.value = false
+        }
+    }
+
+    fun dismissUpdateNotice() {
+        _availableUpdate.value = null
+    }
+
+    fun launchInPlaceUpdate(downloadUrl: String) {
+        container.updateChecker.openInPlaceUpdateDownload(downloadUrl).onFailure { err ->
+            showBanner("ডাউনলোড লিংক খুলতে ব্যর্থ: ${err.message}")
+        }
     }
 
     fun clearBanner() {
@@ -171,6 +232,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun saveSecret(slot: SecretSlot, value: String) {
         container.keyStore.saveSecret(slot, value)
+        container.aiRouter.invalidateKeyCaches()
         showBanner("${slot.label} encrypted in Android Keystore.")
         if (slot in SecureKeyStore.geminiSlots) fetchGeminiModels(preferredSlot = slot)
         if (slot == SecretSlot.OPENROUTER_API_KEY) fetchOpenRouterModels()
@@ -178,6 +240,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deleteSecret(slot: SecretSlot) {
         container.keyStore.deleteSecret(slot)
+        container.aiRouter.invalidateKeyCaches()
         showBanner("${slot.label} removed.")
     }
 
@@ -392,33 +455,46 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // Universal Auto-Skill Importer Actions
+    // Universal Auto-Skill Importer Actions (Single, Batch URL, Full Repo ZIP & 1,000+ Catalogs)
     fun importSkillFromUris(context: Context, uris: List<Uri>) {
         if (uris.isEmpty()) return
         viewModelScope.launch(Dispatchers.IO) {
-            val importedNames = mutableListOf<String>()
+            var totalImported = 0
+            val sampleNames = mutableListOf<String>()
             var lastError: String? = null
-            for (uri in uris) {
-                runCatching {
-                    val resolver = context.contentResolver
-                    val name = queryDisplayName(context, uri) ?: "skill_${System.currentTimeMillis()}.md"
-                    val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: ByteArray(0)
-                    require(bytes.isNotEmpty()) { "$name ফাইলটি খালি।" }
-                    require(bytes.size <= 15 * 1024 * 1024) { "$name ১৫ MB এর বেশি।" }
-                    val savedFile = container.workspaceManager.saveUploadedFile(name, bytes).getOrThrow()
-                    val relPath = container.workspaceManager.relativePathOf(savedFile)
-                    container.universalSkillManager.importFromUploadedPath(relPath, displayName = name).getOrThrow()
-                }.onSuccess { skill ->
-                    importedNames.add("${skill.title} [${skill.ecosystem}, ${skill.wordCount}w]")
-                }.onFailure { err ->
-                    lastError = err.message
+            _skillImportProgress.value = "ফাইল/ZIP পড়া হচ্ছে..."
+            try {
+                for ((idx, uri) in uris.withIndex()) {
+                    runCatching {
+                        val resolver = context.contentResolver
+                        val name = queryDisplayName(context, uri) ?: "skill_${System.currentTimeMillis()}.md"
+                        _skillImportProgress.value = "লোড হচ্ছে (${idx + 1}/${uris.size}): $name..."
+                        val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: ByteArray(0)
+                        require(bytes.isNotEmpty()) { "$name ফাইলটি খালি।" }
+                        require(bytes.size <= 60 * 1024 * 1024) { "$name ৬০ MB এর বেশি।" }
+                        val savedFile = container.workspaceManager.saveUploadedFile(name, bytes).getOrThrow()
+                        val relPath = container.workspaceManager.relativePathOf(savedFile)
+                        container.universalSkillManager.importFromUploadedPathBulk(
+                            relativePath = relPath,
+                            displayName = name,
+                            onProgress = { status -> _skillImportProgress.value = status }
+                        ).getOrThrow()
+                    }.onSuccess { bulk ->
+                        totalImported += bulk.importedCount
+                        if (sampleNames.size < 6) sampleNames.addAll(bulk.sampleTitles.take(6 - sampleNames.size))
+                    }.onFailure { err ->
+                        lastError = err.message
+                    }
                 }
-            }
-            refreshFiles()
-            if (importedNames.isNotEmpty()) {
-                showBanner("অটো-স্কিল যুক্ত হয়েছে: ${importedNames.joinToString(", ")}")
-            } else if (lastError != null) {
-                showBanner("স্কিল ইমপোর্ট ব্যর্থ: $lastError")
+                refreshFiles()
+                if (totalImported > 0) {
+                    val preview = sampleNames.joinToString(", ")
+                    showBanner("${totalImported}টি অটো-স্কিল যুক্ত হয়েছে" + if (preview.isNotBlank()) " ($preview)" else "")
+                } else if (lastError != null) {
+                    showBanner("স্কিল ইমপোর্ট ব্যর্থ: $lastError")
+                }
+            } finally {
+                _skillImportProgress.value = null
             }
         }
     }
@@ -427,15 +503,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val trimmed = source.trim()
         if (trimmed.isBlank()) return
         viewModelScope.launch(Dispatchers.IO) {
-            container.universalSkillManager.importAuto(trimmed, titleHint).fold(
-                onSuccess = { sk ->
-                    refreshFiles()
-                    showBanner("অটো-কনফিগার সম্পন্ন: ${sk.title} (${sk.ecosystem} • ${sk.wordCount} words)")
-                },
-                onFailure = { err ->
-                    showBanner("স্কিল ইমপোর্ট ব্যর্থ: ${err.message}")
-                }
-            )
+            _skillImportProgress.value = "সোর্স বিশ্লেষণ ও ডাউনলোড হচ্ছে..."
+            try {
+                container.universalSkillManager.importAutoBulk(
+                    source = trimmed,
+                    titleHint = titleHint,
+                    onProgress = { status -> _skillImportProgress.value = status }
+                ).fold(
+                    onSuccess = { bulk ->
+                        refreshFiles()
+                        if (bulk.importedCount == 1 && bulk.firstSkill != null) {
+                            val sk = bulk.firstSkill
+                            showBanner("অটো-কনফিগার সম্পন্ন: ${sk.title} (${sk.ecosystem} • ${sk.wordCount} words)")
+                        } else {
+                            val preview = bulk.sampleTitles.take(4).joinToString(", ")
+                            showBanner("${bulk.importedCount}টি স্কিল অটো-পুশ সম্পন্ন [${bulk.modeLabel}] • $preview")
+                        }
+                    },
+                    onFailure = { err ->
+                        showBanner("স্কিল ইমপোর্ট ব্যর্থ: ${err.message}")
+                    }
+                )
+            } finally {
+                _skillImportProgress.value = null
+            }
         }
     }
 
@@ -444,25 +535,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (current.isEmpty()) return
         viewModelScope.launch(Dispatchers.IO) {
             val absorbedIds = mutableSetOf<String>()
+            var totalImported = 0
             val importedTitles = mutableListOf<String>()
             var lastError: String? = null
-            for (att in current) {
-                container.universalSkillManager.importFromUploadedPath(
-                    relativePath = att.relativePath,
-                    displayName = att.displayName
-                ).onSuccess { sk ->
-                    absorbedIds.add(att.id)
-                    importedTitles.add("${sk.title} [${sk.ecosystem}]")
-                }.onFailure { err ->
-                    lastError = err.message
+            _skillImportProgress.value = "সংযুক্ত ফাইল থেকে স্কিল যুক্ত হচ্ছে..."
+            try {
+                for (att in current) {
+                    container.universalSkillManager.importFromUploadedPathBulk(
+                        relativePath = att.relativePath,
+                        displayName = att.displayName,
+                        onProgress = { status -> _skillImportProgress.value = status }
+                    ).onSuccess { bulk ->
+                        absorbedIds.add(att.id)
+                        totalImported += bulk.importedCount
+                        if (importedTitles.size < 6) importedTitles.addAll(bulk.sampleTitles.take(6 - importedTitles.size))
+                    }.onFailure { err ->
+                        lastError = err.message
+                    }
                 }
-            }
-            if (absorbedIds.isNotEmpty()) {
-                _pendingAttachments.update { list -> list.filterNot { it.id in absorbedIds } }
-                refreshFiles()
-                showBanner("${absorbedIds.size}টি ফাইল অটো-স্কিল হিসেবে যুক্ত হয়েছে: ${importedTitles.joinToString(", ")}")
-            } else if (lastError != null) {
-                showBanner("স্কিল অ্যাবজর্ব ব্যর্থ: $lastError")
+                if (absorbedIds.isNotEmpty()) {
+                    _pendingAttachments.update { list -> list.filterNot { it.id in absorbedIds } }
+                    refreshFiles()
+                    showBanner("${totalImported}টি অটো-স্কিল যুক্ত হয়েছে: ${importedTitles.joinToString(", ")}")
+                } else if (lastError != null) {
+                    showBanner("স্কিল অ্যাবজর্ব ব্যর্থ: $lastError")
+                }
+            } finally {
+                _skillImportProgress.value = null
             }
         }
     }
@@ -483,6 +582,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 onFailure = { showBanner("মুছে ফেলতে ব্যর্থ: ${it.message}") }
             )
         }
+    }
+
+    fun clearAllImportedSkills() {
+        viewModelScope.launch(Dispatchers.IO) {
+            container.universalSkillManager.clearAllSkills().fold(
+                onSuccess = {
+                    refreshFiles()
+                    showBanner("সব ইমপোর্টেড স্কিল মুছে ফেলা হয়েছে।")
+                },
+                onFailure = { showBanner("সব মুছে ফেলতে ব্যর্থ: ${it.message}") }
+            )
+        }
+    }
+
+    fun searchImportedSkillsLocal(
+        query: String,
+        allSkills: List<ImportedSkillEntity>
+    ): List<ImportedSkillEntity> {
+        val clean = query.trim()
+        if (clean.isBlank()) return allSkills.take(80)
+        return container.universalSkillManager
+            .matchRelevantSkills(clean, allSkills, limit = 60)
+            .map { it.skill }
     }
 
     fun pauseAgent() = container.agentEngine.pauseTask()
@@ -801,4 +923,123 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             showBanner("All local tasks, memory, audit logs, and encrypted keys cleared.")
         }
     }
+
+    // WhatsApp AI Bot Management Actions
+    fun refreshWhatsAppStatus() {
+        container.whatsAppBotEngine.refreshNotificationStatus()
+    }
+
+    fun toggleWhatsAppBotMaster(enabled: Boolean) {
+        viewModelScope.launch {
+            container.settingsStore.updateWhatsAppBotConfig(enabled = enabled)
+            showBanner(if (enabled) "WhatsApp AI Bot চালু হয়েছে।" else "WhatsApp AI Bot বন্ধ করা হয়েছে।")
+        }
+    }
+
+    fun updateWhatsAppGlobalRules(
+        defaultAutoReplyDm: Boolean,
+        defaultAutoReplyGroup: Boolean,
+        globalAntiLink: Boolean,
+        globalAntiSticker: Boolean,
+        globalAntiForward: Boolean,
+        persona: String
+    ) {
+        viewModelScope.launch {
+            container.settingsStore.updateWhatsAppBotConfig(
+                defaultAutoReplyDm = defaultAutoReplyDm,
+                defaultAutoReplyGroup = defaultAutoReplyGroup,
+                globalAntiLink = globalAntiLink,
+                globalAntiSticker = globalAntiSticker,
+                globalAntiForward = globalAntiForward,
+                persona = persona
+            )
+            showBanner("WhatsApp Bot গ্লোবাল সেটিংস ও AI পার্সোনা সেভ হয়েছে।")
+        }
+    }
+
+    fun requestWhatsAppPhoneLinkCode(phone: String) {
+        viewModelScope.launch {
+            container.whatsAppWebBridge.triggerPhoneLinkCode(phone).fold(
+                onSuccess = { codeOrHint ->
+                    showBanner("WhatsApp Link Code: $codeOrHint")
+                },
+                onFailure = { err ->
+                    showBanner("Link Code error: ${err.message}")
+                }
+            )
+        }
+    }
+
+    fun syncWhatsAppChats() {
+        viewModelScope.launch {
+            container.whatsAppWebBridge.syncChatListNow().fold(
+                onSuccess = { count -> showBanner("Synced $count WhatsApp chats/groups.") },
+                onFailure = { err -> showBanner("Sync error: ${err.message}") }
+            )
+        }
+    }
+
+    fun reloadWhatsAppWeb(resetSession: Boolean = false) {
+        if (resetSession) container.whatsAppWebBridge.clearSessionAndRelink()
+        else container.whatsAppWebBridge.reloadSession()
+    }
+
+    fun openWhatsAppNotificationSettings() {
+        WhatsAppNotificationService.openNotificationListenerSettings(getApplication()).onFailure {
+            showBanner(it.message ?: "Unable to open Notification Access settings")
+        }
+    }
+
+    fun sendWhatsAppMessage(
+        targetChatName: String,
+        isGroup: Boolean,
+        messageOrPrompt: String,
+        composeWithAi: Boolean
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            container.whatsAppBotEngine.sendManualOrAiMessage(
+                targetChatName = targetChatName,
+                isGroup = isGroup,
+                messageOrPrompt = messageOrPrompt,
+                composeWithAi = composeWithAi
+            ).fold(
+                onSuccess = { summary -> showBanner(summary) },
+                onFailure = { err -> showBanner("Send failed: ${err.message}") }
+            )
+        }
+    }
+
+    fun updateWhatsAppChatRules(
+        chatName: String,
+        isGroup: Boolean,
+        autoReply: Boolean? = null,
+        antiLink: Boolean? = null,
+        antiSticker: Boolean? = null,
+        antiForward: Boolean? = null,
+        commandsEnabled: Boolean? = null,
+        customTopicPrompt: String? = null
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val updated = container.whatsAppBotEngine.configureChatRules(
+                chatName = chatName,
+                isGroup = isGroup,
+                autoReply = autoReply,
+                antiLink = antiLink,
+                antiSticker = antiSticker,
+                antiForward = antiForward,
+                commandsEnabled = commandsEnabled,
+                customTopicPrompt = customTopicPrompt
+            )
+            showBanner("${updated.displayName} আপডেট হয়েছে (AutoReply=${updated.autoReplyEnabled}, AntiLink=${updated.antiLinkEnabled}, AntiSticker=${updated.antiStickerEnabled})")
+        }
+    }
+
+    fun deleteWhatsAppChatRecord(chatKey: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            container.repository.deleteWhatsAppChat(chatKey)
+        }
+    }
+
+    fun observeWhatsAppChatMessages(chatKey: String) =
+        container.whatsAppBotEngine.observeMessagesForChat(chatKey)
 }

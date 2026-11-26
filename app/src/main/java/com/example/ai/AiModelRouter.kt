@@ -29,12 +29,23 @@ class AiModelRouter(
 
     private val geminiRotationCursor = AtomicInteger(0)
     private val keyCooldownUntil = ConcurrentHashMap<SecretSlot, Long>()
+    private val slotModelCooldownUntil = ConcurrentHashMap<String, Long>()
+
+    fun invalidateKeyCaches() {
+        keyCooldownUntil.clear()
+        slotModelCooldownUntil.clear()
+        lastHealthyGeminiSlot = null
+        geminiProvider.clearCache()
+        openRouterProvider.clearCache()
+    }
 
     fun isOnline(): Boolean {
-        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        val net = cm.activeNetwork ?: return false
-        val caps = cm.getNetworkCapabilities(net) ?: return false
-        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        return runCatching {
+            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val net = cm.activeNetwork ?: return false
+            val caps = cm.getNetworkCapabilities(net) ?: return false
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        }.getOrDefault(true)
     }
 
     fun getActiveLabel(settings: AppSettings): String {
@@ -183,8 +194,12 @@ class AiModelRouter(
             }
         }
 
+        val candidatesPerSlot = LinkedHashMap<SecretSlot, List<String>>()
+        val triedModelBySlot = LinkedHashMap<SecretSlot, String>()
+        val authFailedSlots = mutableSetOf<SecretSlot>()
         var lastError: Throwable? = null
 
+        // Pass 1: Fast rotation across all keys using their top healthy model
         for ((slot, apiKey) in orderedKeys) {
             val candidates = geminiProvider.resolveCandidateModels(
                 apiKey = apiKey,
@@ -197,9 +212,60 @@ class AiModelRouter(
                 keyCooldownUntil[slot] = System.currentTimeMillis() + 120_000L
                 continue
             }
+            candidatesPerSlot[slot] = candidates
 
-            var keyQuotaOrAuthFailed = false
-            for (modelId in candidates.take(2)) {
+            val primaryModel = candidates.firstOrNull { m ->
+                (slotModelCooldownUntil["${slot.name}::$m"] ?: 0L) <= now
+            } ?: candidates.first()
+            triedModelBySlot[slot] = primaryModel
+
+            val res = geminiProvider.generate(
+                apiKey = apiKey,
+                model = primaryModel,
+                systemPrompt = systemPrompt,
+                messages = messages,
+                tools = tools,
+                stream = stream,
+                fastMode = fastMode,
+                onStreamChunk = onStreamChunk
+            )
+            if (res.isSuccess) {
+                keyCooldownUntil.remove(slot)
+                slotModelCooldownUntil.remove("${slot.name}::$primaryModel")
+                lastHealthyGeminiSlot = slot
+                val slotNum = SecureKeyStore.geminiSlots.indexOf(slot) + 1
+                return Result.success(res.getOrThrow().copy(keySlotLabel = "Key #$slotNum"))
+            }
+
+            lastError = res.exceptionOrNull()
+            val errMsg = lastError?.message.orEmpty()
+            val isAuthOrPerm = errMsg.contains("API key not valid", ignoreCase = true) ||
+                errMsg.contains("API_KEY_INVALID", ignoreCase = true) ||
+                errMsg.contains("(401)") ||
+                errMsg.contains("(403)")
+            if (isAuthOrPerm) {
+                authFailedSlots.add(slot)
+                keyCooldownUntil[slot] = System.currentTimeMillis() + 300_000L
+                continue
+            }
+            val isRateOrQuota = errMsg.contains("(429)") ||
+                errMsg.contains("quota", ignoreCase = true) ||
+                errMsg.contains("RESOURCE_EXHAUSTED", ignoreCase = true)
+            if (isRateOrQuota) {
+                slotModelCooldownUntil["${slot.name}::$primaryModel"] = System.currentTimeMillis() + 75_000L
+            } else {
+                slotModelCooldownUntil["${slot.name}::$primaryModel"] = System.currentTimeMillis() + 30_000L
+            }
+        }
+
+        // Pass 2: Free-tier Gemini limits (RPM/RPD) are per-model! Try backup Flash models (e.g. 2.5-flash-lite, 2.0-flash) on valid keys.
+        for ((slot, apiKey) in orderedKeys) {
+            if (slot in authFailedSlots) continue
+            val candidates = candidatesPerSlot[slot] ?: continue
+            val triedInPass1 = triedModelBySlot[slot]
+            val backupModels = candidates.filter { it != triedInPass1 }.take(3)
+            var hitAuthError = false
+            for (modelId in backupModels) {
                 val res = geminiProvider.generate(
                     apiKey = apiKey,
                     model = modelId,
@@ -212,33 +278,26 @@ class AiModelRouter(
                 )
                 if (res.isSuccess) {
                     keyCooldownUntil.remove(slot)
+                    slotModelCooldownUntil.remove("${slot.name}::$modelId")
                     lastHealthyGeminiSlot = slot
                     val slotNum = SecureKeyStore.geminiSlots.indexOf(slot) + 1
                     return Result.success(res.getOrThrow().copy(keySlotLabel = "Key #$slotNum"))
                 }
-
                 lastError = res.exceptionOrNull()
                 val errMsg = lastError?.message.orEmpty()
-                val isRateOrQuota = errMsg.contains("(429)") ||
-                    errMsg.contains("quota", ignoreCase = true) ||
-                    errMsg.contains("RESOURCE_EXHAUSTED", ignoreCase = true)
                 val isAuthOrPerm = errMsg.contains("API key not valid", ignoreCase = true) ||
+                    errMsg.contains("API_KEY_INVALID", ignoreCase = true) ||
                     errMsg.contains("(401)") ||
                     errMsg.contains("(403)")
-
-                if (isRateOrQuota) {
-                    keyCooldownUntil[slot] = System.currentTimeMillis() + 90_000L
-                    keyQuotaOrAuthFailed = true
-                    break // Immediately rotate to next Gmail API key
-                }
                 if (isAuthOrPerm) {
                     keyCooldownUntil[slot] = System.currentTimeMillis() + 300_000L
-                    keyQuotaOrAuthFailed = true
-                    break // Immediately rotate to next Gmail API key
+                    hitAuthError = true
+                    break
                 }
+                slotModelCooldownUntil["${slot.name}::$modelId"] = System.currentTimeMillis() + 75_000L
             }
-            if (!keyQuotaOrAuthFailed && lastError != null) {
-                keyCooldownUntil[slot] = System.currentTimeMillis() + 30_000L
+            if (!hitAuthError && lastError != null) {
+                keyCooldownUntil[slot] = System.currentTimeMillis() + 45_000L
             }
         }
 
@@ -256,34 +315,59 @@ class AiModelRouter(
         stream: Boolean,
         onStreamChunk: (String) -> Unit
     ): Result<AiCompletionResult> {
-        val candidates = openRouterProvider.resolveCandidateModels(
+        var candidates = openRouterProvider.resolveCandidateModels(
             apiKey = apiKey,
             requestedModel = configuredModel,
             complexity = complexity,
             requiresTools = tools.isNotEmpty(),
             preferFreeOnSimple = preferFree
         )
+        val tried = mutableSetOf<String>()
         var lastError: Throwable? = null
-        for (modelId in candidates.take(3)) {
-            val res = openRouterProvider.generate(
-                apiKey = apiKey,
-                model = modelId,
-                systemPrompt = systemPrompt,
-                messages = messages,
-                tools = tools,
-                stream = stream,
-                onStreamChunk = onStreamChunk
-            )
-            if (res.isSuccess) {
-                return Result.success(res.getOrThrow().copy(keySlotLabel = "OpenRouter"))
+
+        suspend fun tryCandidateBatch(models: List<String>): Result<AiCompletionResult>? {
+            for (modelId in models) {
+                if (!tried.add(modelId)) continue
+                val res = openRouterProvider.generate(
+                    apiKey = apiKey,
+                    model = modelId,
+                    systemPrompt = systemPrompt,
+                    messages = messages,
+                    tools = tools,
+                    stream = stream,
+                    onStreamChunk = onStreamChunk
+                )
+                if (res.isSuccess) {
+                    return Result.success(res.getOrThrow().copy(keySlotLabel = "OpenRouter"))
+                }
+                lastError = res.exceptionOrNull()
+                val errMsg = lastError?.message.orEmpty()
+                if (errMsg.contains("(401)") || errMsg.contains("invalid auth", ignoreCase = true)) {
+                    return Result.failure(lastError!!)
+                }
+                // If paid model returned 402 / insufficient credits, immediately re-resolve :free models!
+                if ((errMsg.contains("(402)") || errMsg.contains("credits", ignoreCase = true)) && configuredModel == AUTO_MODEL_ID) {
+                    openRouterProvider.markFreeTierOnly(apiKey)
+                    return null
+                }
             }
-            lastError = res.exceptionOrNull()
-            val errMsg = lastError?.message.orEmpty()
-            if (errMsg.contains("(401)") || errMsg.contains("invalid auth", ignoreCase = true)) {
-                break
-            }
+            return Result.failure(lastError ?: IllegalStateException("OpenRouter API call failed across discovered models."))
         }
-        return Result.failure(lastError ?: IllegalStateException("OpenRouter API call failed across discovered models."))
+
+        val firstPass = tryCandidateBatch(candidates.take(6))
+        if (firstPass != null) return firstPass
+
+        // Re-resolved :free pass after learning 402 free-tier status
+        candidates = openRouterProvider.resolveCandidateModels(
+            apiKey = apiKey,
+            requestedModel = configuredModel,
+            complexity = complexity,
+            requiresTools = tools.isNotEmpty(),
+            preferFreeOnSimple = true,
+            forceFreeOnly = true
+        )
+        return tryCandidateBatch(candidates.take(6))
+            ?: Result.failure(lastError ?: IllegalStateException("OpenRouter free-tier models temporarily unavailable."))
     }
 
     private fun buildRouteOrder(

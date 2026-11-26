@@ -57,6 +57,7 @@ import androidx.compose.material.icons.filled.PanTool
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Stop
@@ -130,6 +131,7 @@ fun CommandCenterScreen(
     hasAnyApiKey: Boolean,
     pendingAttachments: List<AgentUploadedAttachment>,
     importedSkills: List<ImportedSkillEntity>,
+    skillImportProgress: String? = null,
     browserController: BrowserController,
     browserTabs: List<BrowserTab>,
     activeTabId: String,
@@ -144,6 +146,8 @@ fun CommandCenterScreen(
     onImportSkillSource: (String) -> Unit,
     onToggleImportedSkill: (String, Boolean) -> Unit,
     onDeleteImportedSkill: (String) -> Unit,
+    onClearAllImportedSkills: () -> Unit = {},
+    onSearchSkillsLocal: (String) -> List<ImportedSkillEntity> = { importedSkills.take(80) },
     onSendCommand: (String) -> Unit,
     onPause: () -> Unit,
     onResume: () -> Unit,
@@ -167,6 +171,7 @@ fun CommandCenterScreen(
     var showImportedOnly by remember { mutableStateOf(false) }
     var selectedSkillCategory by remember { mutableStateOf<SkillCategory?>(null) }
     var skillImportInput by remember { mutableStateOf("") }
+    var skillSearchQuery by remember { mutableStateOf("") }
     var interventionNote by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
 
@@ -345,6 +350,16 @@ fun CommandCenterScreen(
                             leadingIcon = { Icon(Icons.Filled.TouchApp, contentDescription = null, modifier = Modifier.size(16.dp), tint = AmberWarning) },
                             label = { Text("Virtual Hands চালু করুন") },
                             modifier = Modifier.testTag("enable_virtual_hands_chip")
+                        )
+                    }
+                }
+                if (agentState.feed.isNotEmpty() && !agentState.isBusy) {
+                    item {
+                        AssistChip(
+                            onClick = onClearFeed,
+                            leadingIcon = { Icon(Icons.Filled.ClearAll, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                            label = { Text("Clear") },
+                            modifier = Modifier.testTag("clear_feed_chip")
                         )
                     }
                 }
@@ -635,18 +650,12 @@ fun CommandCenterScreen(
             OutlinedTextField(
                 value = inputText,
                 onValueChange = { inputText = it },
-                placeholder = { Text("বাংলা বা English কমান্ড লিখুন...") },
-                maxLines = 3,
+                placeholder = { Text("বাংলা / English কমান্ড লিখুন...", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                maxLines = 4,
                 modifier = Modifier
                     .weight(1f)
                     .testTag("command_input_field")
             )
-
-            if (agentState.feed.isNotEmpty()) {
-                IconButton(onClick = onClearFeed) {
-                    Icon(Icons.Filled.ClearAll, contentDescription = "Clear feed")
-                }
-            }
 
             FilledIconButton(
                 onClick = {
@@ -675,23 +684,33 @@ fun CommandCenterScreen(
                     color = NeuralCyan
                 )
                 Text(
-                    "Anthropic, OpenClaw, MCP, Gemini বা যেকোনো এজেন্টের ১০,০০০+ লাইনের স্কিল (.md/.zip/GitHub/Text) দিন — অটো কনফিগার হয়ে এজেন্টে যুক্ত হবে।",
+                    "পুরো GitHub Repo লিংক (যেমন VoltAgent 1000+), রেপোর ডাউনলোড করা .zip ফাইল, বা একাধিক লিংক একবারে দিন — সব স্কিল অটো আলাদা হয়ে পুশ হবে এবং কাজের সময় AI ও বট সেরা স্কিল অটো খুঁজে ব্যবহার করবে (০ টোকেন সার্চ)।",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(Modifier.height(8.dp))
 
-                // Universal Auto-Importer Card
+                // Universal Bulk Auto-Importer Card
                 GlassOsCard(borderColor = NeuralCyan.copy(alpha = 0.55f)) {
                     OutlinedTextField(
                         value = skillImportInput,
                         onValueChange = { skillImportInput = it },
-                        placeholder = { Text("GitHub URL, ZIP URL বা বিশাল স্কিল টেক্সট পেস্ট করুন...") },
+                        placeholder = { Text("GitHub Repo/Awesome URL, একাধিক লিংক (লাইন বাই লাইন), বা ZIP URL...") },
                         maxLines = 3,
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("skill_import_source_input")
                     )
+                    if (!skillImportProgress.isNullOrBlank()) {
+                        Spacer(Modifier.height(6.dp))
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = skillImportProgress,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = NeuralCyan
+                        )
+                    }
                     Spacer(Modifier.height(8.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -700,6 +719,7 @@ fun CommandCenterScreen(
                     ) {
                         OutlinedButton(
                             onClick = { skillFilePickerLauncher.launch(arrayOf("*/*")) },
+                            enabled = skillImportProgress == null,
                             modifier = Modifier
                                 .weight(1f)
                                 .testTag("import_skill_file_button")
@@ -715,7 +735,7 @@ fun CommandCenterScreen(
                                     skillImportInput = ""
                                 }
                             },
-                            enabled = skillImportInput.isNotBlank(),
+                            enabled = skillImportInput.isNotBlank() && skillImportProgress == null,
                             modifier = Modifier
                                 .weight(1f)
                                 .testTag("import_skill_source_button")
@@ -725,9 +745,58 @@ fun CommandCenterScreen(
                             Text("অটো ইম্পোর্ট")
                         }
                     }
+                    Spacer(Modifier.height(6.dp))
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        item {
+                            AssistChip(
+                                onClick = {
+                                    if (skillImportProgress == null) {
+                                        onImportSkillSource("https://github.com/VoltAgent/awesome-agent-skills")
+                                    }
+                                },
+                                label = { Text("1-Tap: VoltAgent 1000+ Pack") }
+                            )
+                        }
+                        item {
+                            AssistChip(
+                                onClick = {
+                                    if (skillImportProgress == null) {
+                                        onImportSkillSource("https://github.com/anthropics/skills")
+                                    }
+                                },
+                                label = { Text("1-Tap: Anthropic Official Pack") }
+                            )
+                        }
+                    }
                 }
 
-                Spacer(Modifier.height(10.dp))
+                if (importedSkills.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = skillSearchQuery,
+                            onValueChange = { skillSearchQuery = it },
+                            placeholder = { Text("স্কিল খুঁজুন (${importedSkills.size}টির মধ্যে): pdf, browser, email, form...") },
+                            singleLine = true,
+                            leadingIcon = { Icon(Icons.Filled.Search, contentDescription = "Search skills") },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("skill_search_query_input")
+                        )
+                        TextButton(
+                            onClick = onClearAllImportedSkills,
+                            modifier = Modifier.testTag("clear_all_imported_skills_button")
+                        ) {
+                            Text("সব মুছুন", color = CoralAlert)
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(8.dp))
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     item {
                         FilterChip(
@@ -761,18 +830,27 @@ fun CommandCenterScreen(
                         )
                     }
                 }
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(8.dp))
 
                 val filteredBuiltIn = if (showImportedOnly) emptyList()
                 else AgentSkillRegistry.skills.filter {
-                    selectedSkillCategory == null || it.category == selectedSkillCategory
+                    val catMatch = selectedSkillCategory == null || it.category == selectedSkillCategory
+                    val q = skillSearchQuery.trim()
+                    val qMatch = q.isBlank() || it.title.contains(q, true) || it.subtitle.contains(q, true)
+                    catMatch && qMatch
                 }
-                val visibleImported = if (showImportedOnly || selectedSkillCategory == null) importedSkills else emptyList()
+                val visibleImported = remember(importedSkills, skillSearchQuery, showImportedOnly, selectedSkillCategory) {
+                    if (showImportedOnly || selectedSkillCategory == null) {
+                        onSearchSkillsLocal(skillSearchQuery)
+                    } else {
+                        emptyList()
+                    }
+                }
 
                 LazyColumn(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(min = 180.dp, max = 330.dp),
+                        .heightIn(min = 160.dp, max = 310.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     if (visibleImported.isNotEmpty()) {

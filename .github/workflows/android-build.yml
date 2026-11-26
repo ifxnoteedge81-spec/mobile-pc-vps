@@ -1,4 +1,4 @@
-name: Android Build & Netlify APK Deploy
+name: Android Build & GitHub Deploy
 
 on:
   push:
@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pages: write
+      id-token: write
 
     steps:
       - name: Checkout repository
@@ -44,11 +46,11 @@ jobs:
 
       - name: Restore persistent debug.keystore from debug.keystore.base64
         run: |
-          if [ ! -f debug.keystore ] && [ -f debug.keystore.base64 ]; then
-            base64 -d debug.keystore.base64 > debug.keystore
-            echo "Restored persistent debug.keystore from repository debug.keystore.base64"
-          fi
-          if [ ! -f debug.keystore ]; then
+          if [ -f debug.keystore.base64 ]; then
+            tr -d '\r\n' < debug.keystore.base64 | base64 -d > debug.keystore
+            keytool -list -keystore debug.keystore -storepass android >/dev/null
+            echo "Verified persistent debug.keystore restored from debug.keystore.base64 (in-place update compatible)"
+          elif [ ! -f debug.keystore ]; then
             keytool -genkeypair -v \
               -keystore debug.keystore \
               -storepass android \
@@ -71,21 +73,24 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           if [ -n "$KEYSTORE_BASE64" ] && [ -n "$STORE_PASSWORD" ] && [ -n "$KEY_PASSWORD" ]; then
-            echo "$KEYSTORE_BASE64" | base64 -d > my-upload-key.jks
+            echo "$KEYSTORE_BASE64" | tr -d '\r\n' | base64 -d > my-upload-key.jks
             echo "signed=true" >> "$GITHUB_OUTPUT"
           else
             echo "signed=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build APK
+      - name: Build APK with monotonic versionCode for in-place updates
         env:
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
+          CI_VERSION_CODE=$(( ( $(date +%s) - 1700000000 ) / 10 + ${GITHUB_RUN_NUMBER:-1} ))
+          echo "CI_VERSION_CODE=$CI_VERSION_CODE" >> "$GITHUB_ENV"
+          echo "Using monotonic CI_VERSION_CODE=$CI_VERSION_CODE"
           if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
-            gradle assembleRelease -PciVersionCode=${{ github.run_number }} -PciVersionName="1.0.${{ github.run_number }}"
+            gradle assembleRelease -PciVersionCode="$CI_VERSION_CODE" -PciVersionName="1.0.${{ github.run_number }}"
           else
-            gradle assembleDebug -PciVersionCode=${{ github.run_number }} -PciVersionName="1.0.${{ github.run_number }}"
+            gradle assembleDebug -PciVersionCode="$CI_VERSION_CODE" -PciVersionName="1.0.${{ github.run_number }}"
           fi
 
       - name: Verify APK, compute SHA-256 & prepare release metadata
@@ -125,6 +130,7 @@ jobs:
           data = {
               "appName": "Personal AI Computer",
               "version": sys.argv[1],
+              "versionCode": int(sys.argv[8]),
               "buildType": sys.argv[2],
               "releaseDate": sys.argv[3],
               "apkFile": "downloads/personal-ai-computer.apk",
@@ -134,14 +140,14 @@ jobs:
               "sha256": sys.argv[6],
               "minAndroid": "Android 7.0 (API 24)",
               "changelog": [
-                  "Autonomous OpenClaw-inspired Agent Engine (Bangla & English)",
-                  "Local Virtual Linux Environment (sh, PyLite Python 3, V8 JS, HTTP server)",
-                  "Multi-tab Chromium WebView DOM Automation & Accessibility Virtual Hands"
+                  "Seamless In-Place Updates (No Uninstall Required) & Data Migration Guard",
+                  "Zero-Second Multi-Bot Fast Engine, Auto-Popup Reflex & Multi-Media Targeting",
+                  "100% Free-Tier Gemini 5-Key Pool + OpenRouter Auto-Recovery & GitHub Releases Distribution"
               ]
           }
           with open("site/downloads/version.json", "w") as f:
               json.dump(data, f, indent=2)
-          ' "$VERSION_TAG" "$BUILD_TYPE" "$RELEASE_DATE" "$RELEASE_URL" "$SIZE_BYTES" "$SHA256" "$GITHUB_REPOSITORY"
+          ' "$VERSION_TAG" "$BUILD_TYPE" "$RELEASE_DATE" "$RELEASE_URL" "$SIZE_BYTES" "$SHA256" "$GITHUB_REPOSITORY" "$CI_VERSION_CODE"
 
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
@@ -164,19 +170,34 @@ jobs:
           files: |
             site/downloads/personal-ai-computer.apk
             site/downloads/personal-ai-computer.apk.sha256
+            site/downloads/version.json
 
-      - name: Deploy complete site with APK directly to Netlify (if token configured)
-        if: env.NETLIFY_AUTH_TOKEN != '' && env.NETLIFY_SITE_ID != ''
-        env:
-          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
-          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
-        uses: nwtgck/actions-netlify@v3
+      - name: Prepare lightweight static web bundle (APK hosted 100% on GitHub Releases)
+        run: |
+          rm -f site/downloads/personal-ai-computer.apk
+          rm -rf site_public
+          mkdir -p site_public/downloads
+          cp site/index.html site/app.js site/style.css site_public/
+          cp site/downloads/version.json site/downloads/personal-ai-computer.apk.sha256 site_public/downloads/
+
+      - name: Setup GitHub Pages
+        id: pages
+        continue-on-error: true
+        uses: actions/configure-pages@v5
+
+      - name: Upload GitHub Pages artifact
+        if: steps.pages.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-pages-artifact@v3
         with:
-          publish-dir: "./site"
-          production-deploy: true
-          deploy-message: "Deploy Personal AI Computer APK build #${{ github.run_number }}"
+          path: "./site_public"
 
-      - name: Sync version metadata to branch for Netlify Git auto-deploy
+      - name: Deploy web download page to GitHub Pages
+        if: steps.pages.outcome == 'success'
+        continue-on-error: true
+        uses: actions/deploy-pages@v4
+
+      - name: Sync lightweight release metadata to branch
         if: startsWith(github.ref, 'refs/heads/')
         continue-on-error: true
         run: |

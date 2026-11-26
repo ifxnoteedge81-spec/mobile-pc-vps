@@ -119,3 +119,35 @@ data class ImportedSkillEntity(
     val enabled: Boolean = true,
     val importedAt: Long = System.currentTimeMillis()
 )
+
+@Entity(tableName = "whatsapp_chats")
+data class WhatsAppChatEntity(
+    @PrimaryKey val chatKey: String,
+    val displayName: String,
+    val isGroup: Boolean = false,
+    val autoReplyEnabled: Boolean = false,
+    val antiLinkEnabled: Boolean = false,
+    val antiStickerEnabled: Boolean = false,
+    val antiForwardEnabled: Boolean = false,
+    val commandsEnabled: Boolean = true,
+    val customTopicPrompt: String = "",
+    val lastMessagePreview: String = "",
+    val lastMessageAt: Long = System.currentTimeMillis(),
+    val unreadCount: Int = 0
+)
+
+@Entity(tableName = "whatsapp_messages")
+data class WhatsAppMessageEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val chatKey: String,
+    val chatName: String,
+    val senderName: String,
+    val isFromMe: Boolean = false,
+    val isGroup: Boolean = false,
+    val body: String,
+    val messageType: String = "TEXT", // TEXT, LINK, STICKER, COMMAND, AI_REPLY, MODERATION
+    val sourceChannel: String = "WA_WEB", // WA_WEB, NOTIFICATION, IN_APP
+    val deletedByModeration: Boolean = false,
+    val latencyMs: Long = 0L,
+    val timestamp: Long = System.currentTimeMillis()
+)

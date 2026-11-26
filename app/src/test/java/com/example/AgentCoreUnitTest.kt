@@ -345,4 +345,270 @@ class AgentCoreUnitTest {
         assertEquals(1, msg.imageAttachments.size)
         assertEquals("image/jpeg", msg.imageAttachments.first().mimeType)
     }
+
+    @Test
+    fun autoPopupReflexBot_safeDismissalAndProtectionRules() {
+        fun node(text: String, clickable: Boolean = true) = com.example.accessibility.ObservedUiNode(
+            text = text,
+            contentDesc = "",
+            viewId = "",
+            className = "Button",
+            bounds = "[0,0][200,400]",
+            centerX = 100f,
+            centerY = 200f,
+            clickable = clickable,
+            editable = false
+        )
+
+        val perm = com.example.agent.ZeroLatencyBotEngine.findSafePopupDismissTarget(
+            "com.google.android.permissioncontroller",
+            listOf(node("Allow App to access photos?", clickable = false), node("While using the app"), node("Don't allow"))
+        )
+        assertEquals("While using the app", perm?.text)
+
+        val skip = com.example.agent.ZeroLatencyBotEngine.findSafePopupDismissTarget(
+            "com.zhiliaoapp.musically",
+            listOf(node("Promo", clickable = false), node("Skip Ad"), node("Buy Pro"))
+        )
+        assertEquals("Skip Ad", skip?.text)
+
+        val contextualCancel = com.example.agent.ZeroLatencyBotEngine.findSafePopupDismissTarget(
+            "com.example.movieapp",
+            listOf(node("Update available later?", clickable = false), node("Update"), node("Cancel"))
+        )
+        assertEquals("Cancel", contextualCancel?.text)
+
+        val uploadCancel = com.example.agent.ZeroLatencyBotEngine.findSafePopupDismissTarget(
+            "com.google.android.youtube",
+            listOf(node("Uploading video 60%", clickable = false), node("Cancel"))
+        )
+        assertEquals(null, uploadCancel)
+
+        val protectedWallet = com.example.agent.ZeroLatencyBotEngine.findSafePopupDismissTarget(
+            "com.bKash.customerapp",
+            listOf(node("Skip"), node("Not now"))
+        )
+        assertEquals(null, protectedWallet)
+    }
+
+    @Test
+    fun geminiProvider_prioritizesStableFreeFlashAndClearCache() {
+        val logger = com.example.security.NetworkAuditLogger()
+        val gemini = com.example.ai.GeminiProvider(logger)
+
+        val flash25 = gemini.scoreGeminiModel("gemini-2.5-flash", com.example.ai.TaskComplexity.REASONING, preferFast = true)
+        val flash25Lite = gemini.scoreGeminiModel("gemini-2.5-flash-lite", com.example.ai.TaskComplexity.SIMPLE, preferFast = true)
+        val flash20 = gemini.scoreGeminiModel("gemini-2.0-flash", com.example.ai.TaskComplexity.MULTISTEP_AGENT, preferFast = true)
+        val preview3 = gemini.scoreGeminiModel("gemini-3-flash-preview", com.example.ai.TaskComplexity.REASONING, preferFast = true)
+        val proExp = gemini.scoreGeminiModel("gemini-2.5-pro-exp", com.example.ai.TaskComplexity.MULTISTEP_AGENT, preferFast = true)
+
+        assertTrue("Expected 2.5-flash ($flash25) > 3-flash-preview ($preview3)", flash25 > preview3)
+        assertTrue("Expected 2.5-flash-lite ($flash25Lite) > 3-flash-preview ($preview3)", flash25Lite > preview3)
+        assertTrue("Expected 2.0-flash ($flash20) > pro-exp ($proExp)", flash20 > proExp)
+        gemini.clearCache()
+    }
+
+    @Test
+    fun openRouterProvider_enforcesFreeModelsCooldownAndToolPriority() {
+        val logger = com.example.security.NetworkAuditLogger()
+        val orProvider = com.example.ai.OpenRouterProvider(logger)
+
+        val catalog = listOf(
+            com.example.ai.OpenRouterModelInfo("openai/gpt-4o", "GPT-4o", 128000, isFree = false, supportsTools = true),
+            com.example.ai.OpenRouterModelInfo("openrouter/auto", "Auto", 128000, isFree = false, supportsTools = true),
+            com.example.ai.OpenRouterModelInfo("qwen/qwen-2.5-72b-instruct:free", "Qwen Free", 32768, isFree = true, supportsTools = true),
+            com.example.ai.OpenRouterModelInfo("google/gemma-3-27b-it:free", "Gemma 3 Free", 32768, isFree = true, supportsTools = false),
+            com.example.ai.OpenRouterModelInfo("openrouter/free", "Free Router", 65536, isFree = true, supportsTools = false),
+            com.example.ai.OpenRouterModelInfo("openai/text-embedding-3-small", "Embed", 8192, isFree = true, supportsTools = false)
+        )
+
+        val freeToolCandidates = orProvider.filterAndRankModels(
+            models = catalog,
+            freeOnly = true,
+            complexity = com.example.ai.TaskComplexity.MULTISTEP_AGENT,
+            requiresTools = true,
+            preferFreeOnSimple = true
+        )
+        assertTrue(
+            "Must NEVER pick paid models when freeOnly=true: $freeToolCandidates",
+            !freeToolCandidates.contains("openai/gpt-4o") && !freeToolCandidates.contains("openrouter/auto")
+        )
+        assertTrue("Must exclude embedding models: $freeToolCandidates", !freeToolCandidates.contains("openai/text-embedding-3-small"))
+        assertEquals(
+            "Tool-capable free model must rank #1 ahead of openrouter/free",
+            "qwen/qwen-2.5-72b-instruct:free",
+            freeToolCandidates.first()
+        )
+        assertTrue("openrouter/free should remain in fallback candidates", freeToolCandidates.contains("openrouter/free"))
+
+        // Verify markModelFailure demotes a broken free model in subsequent resolution
+        orProvider.markModelFailure("qwen/qwen-2.5-72b-instruct:free", cooldownMs = 60_000L)
+        val afterCooldown = orProvider.filterAndRankModels(
+            models = catalog,
+            freeOnly = true,
+            complexity = com.example.ai.TaskComplexity.MULTISTEP_AGENT,
+            requiresTools = true,
+            preferFreeOnSimple = true
+        )
+        assertTrue("Failed model should be skipped while cooling down: $afterCooldown", afterCooldown.first() != "qwen/qwen-2.5-72b-instruct:free")
+        orProvider.clearCache()
+    }
+
+    @Test
+    fun pyLite_iteratesFileHandleLinesAndStringMethods() {
+        val workspace = VirtualWorkspaceManager(tempFolder.newFolder("py_iter_ws"))
+        workspace.writeTextFile("workspace/lines.txt", "alpha\nbeta\n123").getOrThrow()
+        val python = LocalPythonEngine(workspace)
+        val res = python.executeScript(
+            """
+            with open("workspace/lines.txt", "r") as f:
+                collected = []
+                for line in f:
+                    collected.append(line.strip())
+            print("LINES=", collected)
+            print("DIGITS=", collected[2].isdigit())
+            print("FIND=", "hello world".find("world"))
+            print("COUNT=", "banana".count("na"))
+            """.trimIndent()
+        )
+        assertTrue("PyLite line iteration failed: ${res.stderr}", res.success)
+        assertTrue(res.stdout.contains("LINES= [alpha, beta, 123]"))
+        assertTrue(res.stdout.contains("DIGITS= True"))
+        assertTrue(res.stdout.contains("FIND= 6"))
+        assertTrue(res.stdout.contains("COUNT= 2"))
+    }
+
+    @Test
+    fun appUpdateChecker_detectsNewerVersionWithoutUninstall() {
+        assertEquals(42L, com.example.runtime.AppUpdateChecker.extractRunNumber("main-42"))
+        assertEquals(18L, com.example.runtime.AppUpdateChecker.extractRunNumber("1.0.18"))
+        assertTrue(
+            com.example.runtime.AppUpdateChecker.isRemoteNewer(
+                installedVersionCode = 9_570_000L,
+                installedVersionName = "1.0.6",
+                remoteVersionCode = 9_570_120L,
+                remoteVersionLabel = "main-7"
+            )
+        )
+        assertTrue(
+            !com.example.runtime.AppUpdateChecker.isRemoteNewer(
+                installedVersionCode = 9_570_120L,
+                installedVersionName = "1.0.7",
+                remoteVersionCode = 9_570_120L,
+                remoteVersionLabel = "main-7"
+            )
+        )
+    }
+
+    @Test
+    fun whatsAppBot_parsesInChatCommandsAndDetectsLinksAndStickers() {
+        val antiLinkOn = com.example.whatsapp.WaCommandParser.parse(".antilink on")
+        assertEquals(com.example.whatsapp.WaCommandAction.ToggleAntiLink(true), antiLinkOn)
+
+        val antiLinkOff = com.example.whatsapp.WaCommandParser.parse("!antilink off")
+        assertEquals(com.example.whatsapp.WaCommandAction.ToggleAntiLink(false), antiLinkOff)
+
+        val antiStickerOn = com.example.whatsapp.WaCommandParser.parse("/antisticker on")
+        assertEquals(com.example.whatsapp.WaCommandAction.ToggleAntiSticker(true), antiStickerOn)
+
+        val autoReplyBn = com.example.whatsapp.WaCommandParser.parse(".অটোরিপ্লাই অন")
+        assertEquals(com.example.whatsapp.WaCommandAction.ToggleAutoReply(true), autoReplyBn)
+
+        val askAi = com.example.whatsapp.WaCommandParser.parse(".ai আজকের আবহাওয়া কেমন?")
+        assertEquals(com.example.whatsapp.WaCommandAction.AskAi("আজকের আবহাওয়া কেমন?"), askAi)
+
+        assertTrue(com.example.whatsapp.WaModerationDetector.containsLink("Join here https://chat.whatsapp.com/ABC123"))
+        assertTrue(com.example.whatsapp.WaModerationDetector.containsLink("Visit wa.me/8801700000000"))
+        assertTrue(!com.example.whatsapp.WaModerationDetector.containsLink("Hello vai kemon acho"))
+
+        assertTrue(com.example.whatsapp.WaModerationDetector.looksLikeStickerText("[Sticker]"))
+        assertEquals("grp::tech squad", com.example.whatsapp.WaChatKeyHelper.normalize("  Tech   Squad ", true))
+        assertEquals("dm::rahim", com.example.whatsapp.WaChatKeyHelper.normalize("Rahim", false))
+    }
+
+    @Test
+    fun universalSkillManager_splitsMultiSkillZipAndIndexesCatalog1000PlusSkillsAndMatchesBangla() = kotlinx.coroutines.runBlocking {
+        val workspace = VirtualWorkspaceManager(tempFolder.newFolder("bulk_skill_ws"))
+        val dbMap = linkedMapOf<String, com.example.storage.ImportedSkillEntity>()
+        val inMemoryStore = object : com.example.agent.UniversalSkillManager.SkillStore {
+            override suspend fun getAllImportedSkillsSnapshot() = dbMap.values.toList()
+            override suspend fun getImportedSkillBySlug(slug: String) = dbMap[slug]
+            override suspend fun upsertImportedSkill(skill: com.example.storage.ImportedSkillEntity) {
+                dbMap[skill.slug] = skill
+            }
+            override suspend fun upsertImportedSkills(skills: List<com.example.storage.ImportedSkillEntity>) {
+                skills.forEach { dbMap[it.slug] = it }
+            }
+            override suspend fun deleteImportedSkill(slug: String) {
+                dbMap.remove(slug)
+            }
+            override suspend fun clearAllImportedSkills() {
+                dbMap.clear()
+            }
+        }
+        val manager = com.example.agent.UniversalSkillManager(
+            workspace = workspace,
+            repository = inMemoryStore,
+            auditLogger = com.example.security.NetworkAuditLogger()
+        )
+
+        // 1. Test multi-skill GitHub-style archive ZIP with 6 separate SKILL.md folders
+        val multiBytes = java.io.ByteArrayOutputStream().use { baos ->
+            java.util.zip.ZipOutputStream(baos).use { zos ->
+                val folders = listOf(
+                    "pdf" to "Extract, merge, and generate PDF documents.",
+                    "docx" to "Create and edit formatted Word documents.",
+                    "webapp-testing" to "Playwright browser form fill and UI testing.",
+                    "cold-email" to "Write personalized outreach and Gmail emails.",
+                    "xlsx" to "Spreadsheet formulas and Excel data tables.",
+                    "frontend-design" to "Modern responsive web UI and HTML design."
+                )
+                for ((name, desc) in folders) {
+                    zos.putNextEntry(java.util.zip.ZipEntry("skills-main/skills/$name/SKILL.md"))
+                    zos.write("---\nname: \"$name\"\ndescription: \"$desc\"\n---\n# $name\n$desc\n".toByteArray())
+                    zos.closeEntry()
+                }
+            }
+            baos.toByteArray()
+        }
+        val multiRes = manager.importFromZipBytesBulk(multiBytes, "skills.zip", repoBaseTreeUrl = "https://github.com/anthropics/skills/tree/main")
+        assertEquals(6, multiRes.importedCount)
+        assertEquals(6, dbMap.size)
+
+        // 2. Test 1,050-entry awesome-agent-skills catalog ZIP -> batch-indexed cleanly
+        val catalogMd = buildString {
+            append("# Awesome Agent Skills\n\n## Browser & Web\n")
+            append("- [playwright-form-filler](https://github.com/example/playwright-form-filler) - Automated browser form filling and web clicking\n")
+            append("## Productivity & Docs\n")
+            for (i in 1..1050) {
+                append("- [community-skill-$i](https://github.com/voltagent-demo/skill-$i) - Automated workflow helper #$i for tasks\n")
+            }
+        }
+        val catalogZipBytes = java.io.ByteArrayOutputStream().use { baos ->
+            java.util.zip.ZipOutputStream(baos).use { zos ->
+                zos.putNextEntry(java.util.zip.ZipEntry("awesome-agent-skills-main/README.md"))
+                zos.write(catalogMd.toByteArray())
+                zos.closeEntry()
+            }
+            baos.toByteArray()
+        }
+        val catRes = manager.importFromZipBytesBulk(
+            catalogZipBytes,
+            "awesome-agent-skills.zip",
+            repoBaseTreeUrl = "https://github.com/VoltAgent/awesome-agent-skills/tree/main"
+        )
+        assertTrue("Expected >= 1050 skills indexed, got ${catRes.importedCount}", catRes.importedCount >= 1050)
+        assertTrue("Expected total db >= 1056, got ${dbMap.size}", dbMap.size >= 1056)
+
+        // 3. Test Zero-Token Smart Matching with Bangla + English queries across 1,056 skills
+        val allSkills = dbMap.values.toList()
+        val pdfHits = manager.matchRelevantSkills("আমার একটা পিডিএফ ফাইল তৈরি করো", allSkills, limit = 5)
+        assertTrue("Expected pdf skill in top hits: ${pdfHits.map { it.skill.slug }}", pdfHits.any { it.skill.slug.contains("pdf") })
+
+        val emailHits = manager.matchRelevantSkills("প্রফেশনাল ইমেইল পাঠাও", allSkills, limit = 5)
+        assertTrue("Expected email skill in top hits: ${emailHits.map { it.skill.slug }}", emailHits.any { it.skill.slug.contains("email") })
+
+        val formHits = manager.matchRelevantSkills("ব্রাউজারে ওয়েব ফর্ম ফিলাপ করো", allSkills, limit = 5)
+        assertTrue("Expected browser/form skill in top hits: ${formHits.map { it.skill.slug }}", formHits.any { it.skill.slug.contains("form") || it.skill.slug.contains("testing") })
+    }
 }

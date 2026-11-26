@@ -18,6 +18,13 @@ data class InstalledAppSummary(
     val versionName: String
 )
 
+data class StagedGalleryMedia(
+    val displayName: String,
+    val albumPath: String,
+    val mimeType: String,
+    val uriString: String
+)
+
 /**
  * Controller B: Authorized Android Accessibility Virtual Hands, Play Store Intents, Clipboard & App Launcher.
  */
@@ -229,8 +236,75 @@ class DeviceAutomationController(private val context: Context) {
         "Copied ${text.length} chars to clipboard"
     }
 
+    fun stageMediaToPublicGallery(relativePath: String): Result<StagedGalleryMedia> = runCatching {
+        val baseDir = java.io.File(context.filesDir, "virtual_env").canonicalFile
+        val relClean = relativePath.trim().trimStart('/')
+        val file = java.io.File(baseDir, relClean).canonicalFile
+        require(file.path.startsWith(baseDir.path) && file.exists() && file.isFile) {
+            "Workspace media file not found: $relativePath"
+        }
+        val ext = file.extension.lowercase()
+        val mime = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: when (ext) {
+            "jpg", "jpeg" -> "image/jpeg"
+            "png" -> "image/png"
+            "webp" -> "image/webp"
+            "gif" -> "image/gif"
+            "mp4" -> "video/mp4"
+            "mov" -> "video/quicktime"
+            "mkv" -> "video/x-matroska"
+            else -> "application/octet-stream"
+        }
+        val isVideo = mime.startsWith("video/")
+        val isImage = mime.startsWith("image/")
+        require(isImage || isVideo) { "Only image/video files can be staged to Gallery: ${file.name}" }
+
+        val albumSubfolder = if (isVideo) "Movies/AI Computer" else "Pictures/AI Computer"
+        val stagedName = file.name
+
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            val collection = if (isVideo) {
+                android.provider.MediaStore.Video.Media.getContentUri(android.provider.MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            } else {
+                android.provider.MediaStore.Images.Media.getContentUri(android.provider.MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            }
+            val values = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, stagedName)
+                put(android.provider.MediaStore.MediaColumns.MIME_TYPE, mime)
+                put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, albumSubfolder)
+                put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            val resolver = context.contentResolver
+            val uri = resolver.insert(collection, values)
+                ?: error("Could not create MediaStore entry for $stagedName")
+            try {
+                resolver.openOutputStream(uri)?.use { out ->
+                    file.inputStream().use { input -> input.copyTo(out) }
+                } ?: error("Failed to write bytes to MediaStore URI")
+                values.clear()
+                values.put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+                StagedGalleryMedia(stagedName, albumSubfolder, mime, uri.toString())
+            } catch (t: Throwable) {
+                runCatching { resolver.delete(uri, null, null) }
+                throw t
+            }
+        } else {
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                file
+            )
+            StagedGalleryMedia(stagedName, "virtual_env/$relClean", mime, uri.toString())
+        }
+    }
+
     fun sendShareOrIntent(actionType: String, target: String, body: String = ""): Result<String> = runCatching {
         val typeLower = actionType.lowercase().trim()
+        if (typeLower == "stage_gallery") {
+            val staged = stageMediaToPublicGallery(target).getOrThrow()
+            return@runCatching "Staged '${staged.displayName}' into ${staged.albumPath} (ready at top of Photo/Thumbnail Picker)."
+        }
+
         val intent = when (typeLower) {
             "share_file" -> {
                 val baseDir = java.io.File(context.filesDir, "virtual_env").canonicalFile
@@ -278,6 +352,51 @@ class DeviceAutomationController(private val context: Context) {
                     }
                 }
             }
+            "share_multiple" -> {
+                val baseDir = java.io.File(context.filesDir, "virtual_env").canonicalFile
+                val paths = target.split(",", ";", "\n").map { it.trim().trimStart('/') }.filter { it.isNotEmpty() }
+                require(paths.isNotEmpty()) { "Provide at least one relative file path for share_multiple" }
+                val uris = ArrayList<Uri>()
+                val mimes = mutableSetOf<String>()
+                for (relClean in paths) {
+                    val file = java.io.File(baseDir, relClean).canonicalFile
+                    require(file.path.startsWith(baseDir.path) && file.exists() && file.isFile) {
+                        "Workspace file not found: $relClean"
+                    }
+                    val uri = androidx.core.content.FileProvider.getUriForFile(
+                        context,
+                        "${context.packageName}.fileprovider",
+                        file
+                    )
+                    uris.add(uri)
+                    val mime = android.webkit.MimeTypeMap.getSingleton()
+                        .getMimeTypeFromExtension(file.extension.lowercase()) ?: "*/*"
+                    mimes.add(mime.substringBefore("/") + "/*")
+                }
+                val combinedMime = if (mimes.size == 1) mimes.first() else "*/*"
+                val send = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                    type = combinedMime
+                    putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                val targetHint = body.trim()
+                val matchedPkg = if (targetHint.isNotBlank()) {
+                    listLaunchableApps().firstOrNull {
+                        it.packageName.equals(targetHint, ignoreCase = true) ||
+                            it.appName.contains(targetHint, ignoreCase = true) ||
+                            it.packageName.contains(targetHint, ignoreCase = true)
+                    }?.packageName
+                } else null
+                if (!matchedPkg.isNullOrBlank()) {
+                    send.setPackage(matchedPkg)
+                    send.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    send
+                } else {
+                    Intent.createChooser(send, "Share ${uris.size} files").apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                }
+            }
             "share" -> Intent.createChooser(
                 Intent(Intent.ACTION_SEND).apply {
                     type = "text/plain"
@@ -295,7 +414,7 @@ class DeviceAutomationController(private val context: Context) {
             "url" -> Intent(Intent.ACTION_VIEW, Uri.parse(target.trim())).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            else -> error("Unsupported intent action '$actionType'. Use: share_file, share, dial, email, url")
+            else -> error("Unsupported intent action '$actionType'. Use: share_file, share_multiple, stage_gallery, share, dial, email, url")
         }
         context.startActivity(intent)
         "Dispatched Android $actionType intent for '$target'"

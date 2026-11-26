@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Language
@@ -27,6 +28,7 @@ import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.VideoLibrary
@@ -219,6 +221,20 @@ fun DashboardScreen(
                         Spacer(Modifier.width(6.dp))
                         Text("Virtual Desktop")
                     }
+                }
+                Spacer(Modifier.height(8.dp))
+                FilledTonalButton(
+                    onClick = { onNavigate(AppDestination.WhatsAppBot) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("hero_open_whatsapp_bot")
+                ) {
+                    Icon(Icons.Filled.Chat, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        if (settings.waBotEnabled) "WhatsApp AI Bot • Active (Open Studio)"
+                        else "WhatsApp AI Bot Studio (Link & Auto-Manage)"
+                    )
                 }
             }
         }

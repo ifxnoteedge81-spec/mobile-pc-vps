@@ -41,7 +41,14 @@ data class AppSettings(
     val powerProfile: PowerProfile = PowerProfile.BALANCED,
     val maxConcurrency: Int = 2,
     val preferredLanguage: String = "Auto (Bangla & English)",
-    val pendingRestartNotice: Boolean = false
+    val pendingRestartNotice: Boolean = false,
+    val waBotEnabled: Boolean = false,
+    val waDefaultAutoReplyDm: Boolean = true,
+    val waDefaultAutoReplyGroup: Boolean = false,
+    val waGlobalAntiLink: Boolean = false,
+    val waGlobalAntiSticker: Boolean = false,
+    val waGlobalAntiForward: Boolean = false,
+    val waBotPersona: String = "You are a zero-latency, smart WhatsApp AI assistant. Understand prior conversation context and reply naturally in Bangla, Banglish, or English matching the user's topic. Keep replies concise and helpful."
 )
 
 class SettingsDataStore(private val context: Context) {
@@ -63,6 +70,13 @@ class SettingsDataStore(private val context: Context) {
         val MAX_CONCURRENCY = intPreferencesKey("max_concurrency")
         val PREFERRED_LANGUAGE = stringPreferencesKey("preferred_language")
         val PENDING_RESTART_NOTICE = booleanPreferencesKey("pending_restart_notice")
+        val WA_BOT_ENABLED = booleanPreferencesKey("wa_bot_enabled")
+        val WA_DEFAULT_AUTO_REPLY_DM = booleanPreferencesKey("wa_default_auto_reply_dm")
+        val WA_DEFAULT_AUTO_REPLY_GROUP = booleanPreferencesKey("wa_default_auto_reply_group")
+        val WA_GLOBAL_ANTI_LINK = booleanPreferencesKey("wa_global_anti_link")
+        val WA_GLOBAL_ANTI_STICKER = booleanPreferencesKey("wa_global_anti_sticker")
+        val WA_GLOBAL_ANTI_FORWARD = booleanPreferencesKey("wa_global_anti_forward")
+        val WA_BOT_PERSONA = stringPreferencesKey("wa_bot_persona")
     }
 
     val settings: Flow<AppSettings> = context.dataStore.data.map { prefs ->
@@ -82,7 +96,15 @@ class SettingsDataStore(private val context: Context) {
             powerProfile = runCatching { PowerProfile.valueOf(prefs[Keys.POWER_PROFILE] ?: "BALANCED") }.getOrDefault(PowerProfile.BALANCED),
             maxConcurrency = prefs[Keys.MAX_CONCURRENCY] ?: 2,
             preferredLanguage = prefs[Keys.PREFERRED_LANGUAGE] ?: "Auto (Bangla & English)",
-            pendingRestartNotice = prefs[Keys.PENDING_RESTART_NOTICE] ?: false
+            pendingRestartNotice = prefs[Keys.PENDING_RESTART_NOTICE] ?: false,
+            waBotEnabled = prefs[Keys.WA_BOT_ENABLED] ?: false,
+            waDefaultAutoReplyDm = prefs[Keys.WA_DEFAULT_AUTO_REPLY_DM] ?: true,
+            waDefaultAutoReplyGroup = prefs[Keys.WA_DEFAULT_AUTO_REPLY_GROUP] ?: false,
+            waGlobalAntiLink = prefs[Keys.WA_GLOBAL_ANTI_LINK] ?: false,
+            waGlobalAntiSticker = prefs[Keys.WA_GLOBAL_ANTI_STICKER] ?: false,
+            waGlobalAntiForward = prefs[Keys.WA_GLOBAL_ANTI_FORWARD] ?: false,
+            waBotPersona = prefs[Keys.WA_BOT_PERSONA]?.takeIf { it.isNotBlank() }
+                ?: "You are a zero-latency, smart WhatsApp AI assistant. Understand prior conversation context and reply naturally in Bangla, Banglish, or English matching the user's topic. Keep replies concise and helpful."
         )
     }
 
@@ -129,6 +151,26 @@ class SettingsDataStore(private val context: Context) {
             if (markPendingRestart) {
                 it[Keys.PENDING_RESTART_NOTICE] = true
             }
+        }
+    }
+
+    suspend fun updateWhatsAppBotConfig(
+        enabled: Boolean? = null,
+        defaultAutoReplyDm: Boolean? = null,
+        defaultAutoReplyGroup: Boolean? = null,
+        globalAntiLink: Boolean? = null,
+        globalAntiSticker: Boolean? = null,
+        globalAntiForward: Boolean? = null,
+        persona: String? = null
+    ) {
+        context.dataStore.edit { prefs ->
+            enabled?.let { prefs[Keys.WA_BOT_ENABLED] = it }
+            defaultAutoReplyDm?.let { prefs[Keys.WA_DEFAULT_AUTO_REPLY_DM] = it }
+            defaultAutoReplyGroup?.let { prefs[Keys.WA_DEFAULT_AUTO_REPLY_GROUP] = it }
+            globalAntiLink?.let { prefs[Keys.WA_GLOBAL_ANTI_LINK] = it }
+            globalAntiSticker?.let { prefs[Keys.WA_GLOBAL_ANTI_STICKER] = it }
+            globalAntiForward?.let { prefs[Keys.WA_GLOBAL_ANTI_FORWARD] = it }
+            persona?.let { prefs[Keys.WA_BOT_PERSONA] = it.trim() }
         }
     }
 

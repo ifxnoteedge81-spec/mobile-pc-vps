@@ -58,7 +58,9 @@ class ToolRegistry(
     private val browser: BrowserController,
     private val deviceController: DeviceAutomationController,
     private val repository: AgentRepository,
-    private val skillManager: UniversalSkillManager
+    private val skillManager: UniversalSkillManager,
+    private val botEngine: ZeroLatencyBotEngine? = null,
+    private val whatsAppBotEngine: com.example.whatsapp.WhatsAppBotEngine? = null
 ) {
 
     fun getDeclarations(): List<ToolDeclaration> = listOf(
@@ -174,6 +176,16 @@ class ToolRegistry(
             )
         ),
         ToolDeclaration(
+            name = "browser_batch",
+            description = "Execute multiple Live Browser form fills and clicks in ONE fast turn (e.g. First name + Last name + Next).",
+            parametersSchema = schema(
+                props = mapOf(
+                    "steps" to prop("string", "JSON array of {action:'fill'|'click'|'scroll'|'wait_ms', field, value, target, direction}")
+                ),
+                required = listOf("steps")
+            )
+        ),
+        ToolDeclaration(
             name = "browser_eval_js",
             description = "Run JavaScript inside the integrated Live Browser DOM to inspect or automate complex pages.",
             parametersSchema = schema(
@@ -226,7 +238,7 @@ class ToolRegistry(
         ),
         ToolDeclaration(
             name = "device_virtual_hand",
-            description = "Ultra-fast Virtual Hands control (no screenshots — auto-reads live screen after acting). Actions: tap, double_tap, long_press, swipe, scroll_up, scroll_down, scroll_left, scroll_right, scroll_to_text, click_text, type, type_focused, press_enter, launch_app, open_url, back, home, recents, notifications, quick_settings, wait_ms, wait_and_inspect, batch (runs multiple steps in 1 turn via 'steps' JSON array).",
+            description = "Ultra-fast Virtual Hands control (no screenshots — auto-clears Allow/Skip/Later popups and auto-reads live screen after acting). Actions: tap, double_tap, long_press, swipe, scroll_up, scroll_down, scroll_left, scroll_right, scroll_to_text, click_text, type, type_focused, press_enter, launch_app, open_url, back, home, recents, notifications, quick_settings, auto_dismiss_popups, wait_ms, wait_and_inspect, batch (runs multiple steps in 1 turn via 'steps' JSON array).",
             parametersSchema = schema(
                 props = mapOf(
                     "action" to prop("string", "Action name or 'batch'"),
@@ -250,12 +262,12 @@ class ToolRegistry(
         ),
         ToolDeclaration(
             name = "device_intent_action",
-            description = "Share workspace file (uploads/...) directly to an app (TikTok, WhatsApp, etc.), Share sheet, Dialer, Email compose, or external URL intent.",
+            description = "MultiMediaTargetBot & Android Intent helper: share_file (send single file to app), share_multiple (comma-separated paths to app), stage_gallery (copy thumbnail/image into Android Gallery so Photo Pickers show it at top), share, dial, email, url.",
             parametersSchema = schema(
                 props = mapOf(
-                    "action_type" to prop("string", "'share_file', 'share', 'dial', 'email', or 'url'"),
-                    "target" to prop("string", "Relative file path for share_file (e.g. 'uploads/photo.jpg'), phone number, email, URL, or text"),
-                    "body" to prop("string", "For share_file: optional target app name/package (e.g. 'TikTok'); otherwise optional text body")
+                    "action_type" to prop("string", "'share_file', 'share_multiple', 'stage_gallery', 'share', 'dial', 'email', or 'url'"),
+                    "target" to prop("string", "Relative path(s) e.g. 'uploads/video.mp4' or 'uploads/a.jpg,uploads/b.jpg', phone, email, URL, or text"),
+                    "body" to prop("string", "Optional target app name/package (e.g. 'YouTube', 'TikTok') or text body")
                 ),
                 required = listOf("action_type", "target")
             )
@@ -331,18 +343,29 @@ class ToolRegistry(
         ),
         ToolDeclaration(
             name = "skill_import_auto",
-            description = "Auto-import and adapt ANY external skill (Anthropic SKILL.md, OpenClaw, MCP, Gemini, scripts, .zip bundles, GitHub URLs, or huge multi-thousand-word skill docs) into this agent permanently.",
+            description = "Auto-import and adapt single OR bulk skills (1,000+ GitHub repo URLs, awesome-skills catalogs, multi-skill .zip archives, multi-line URLs, or SKILL.md files) automatically.",
             parametersSchema = schema(
                 props = mapOf(
-                    "source" to prop("string", "Relative virtual_env path (e.g. uploads/...), GitHub/HTTPS URL, or raw skill text"),
-                    "title_hint" to prop("string", "Optional title for the skill")
+                    "source" to prop("string", "Relative virtual_env path, GitHub repo/file URL, multi-line URLs, or raw skill text"),
+                    "title_hint" to prop("string", "Optional title for single skill")
                 ),
                 required = listOf("source")
             )
         ),
         ToolDeclaration(
+            name = "skill_search",
+            description = "Smart local search across all imported skills (even 1,000-3,000+ skills) using English or Bangla task keywords.",
+            parametersSchema = schema(
+                props = mapOf(
+                    "query" to prop("string", "Task keywords in English or Bangla, e.g. 'pdf', 'browser form', 'email'"),
+                    "limit" to prop("integer", "Max results (default 10)")
+                ),
+                required = listOf("query")
+            )
+        ),
+        ToolDeclaration(
             name = "skill_list",
-            description = "List all installed built-in skills and auto-imported external skills (with slug, ecosystem, word count, and status).",
+            description = "List installed built-in skills and top matching auto-imported external skills.",
             parametersSchema = schema(
                 props = mapOf("filter" to prop("string", "Optional keyword filter")),
                 required = emptyList()
@@ -401,6 +424,54 @@ class ToolRegistry(
                 props = mapOf("detail" to prop("string", "Optional 'summary' or 'full'")),
                 required = emptyList()
             )
+        ),
+        ToolDeclaration(
+            name = "wa_list_chats",
+            description = "List all synced WhatsApp contacts & groups with auto-reply, anti-link, anti-sticker, and link connection status.",
+            parametersSchema = schema(
+                props = mapOf("filter" to prop("string", "Optional 'groups', 'dm', or search keyword")),
+                required = emptyList()
+            )
+        ),
+        ToolDeclaration(
+            name = "wa_read_chat",
+            description = "Read previous conversation history for a specific WhatsApp contact or group.",
+            parametersSchema = schema(
+                props = mapOf(
+                    "chat_name" to prop("string", "Exact or partial WhatsApp contact or group name"),
+                    "is_group" to prop("boolean", "True if group chat")
+                ),
+                required = listOf("chat_name")
+            )
+        ),
+        ToolDeclaration(
+            name = "wa_send_message",
+            description = "Send a direct or AI-composed WhatsApp message to any contact or group via Linked WhatsApp Web / Notification Quick-Reply without leaving the app.",
+            parametersSchema = schema(
+                props = mapOf(
+                    "chat_name" to prop("string", "WhatsApp contact or group name"),
+                    "message" to prop("string", "Message text or AI instruction"),
+                    "is_group" to prop("boolean", "True if sending to a WhatsApp group"),
+                    "compose_with_ai" to prop("boolean", "If true, AI composes the reply using prior conversation history")
+                ),
+                required = listOf("chat_name", "message")
+            )
+        ),
+        ToolDeclaration(
+            name = "wa_configure_chat",
+            description = "Enable/disable Auto-Reply AI, Anti-Link, Anti-Sticker, Anti-Forward, or custom topic rules for a specific WhatsApp group or contact.",
+            parametersSchema = schema(
+                props = mapOf(
+                    "chat_name" to prop("string", "Contact or group name"),
+                    "is_group" to prop("boolean", "True if group"),
+                    "auto_reply" to prop("boolean", "Enable/disable AI auto-reply for this chat"),
+                    "anti_link" to prop("boolean", "Auto-delete links in this group/chat"),
+                    "anti_sticker" to prop("boolean", "Auto-delete stickers in this group/chat"),
+                    "anti_forward" to prop("boolean", "Auto-delete forwarded spam"),
+                    "custom_topic_prompt" to prop("string", "Optional topic/persona override for this group or contact")
+                ),
+                required = listOf("chat_name")
+            )
         )
     )
 
@@ -418,37 +489,47 @@ class ToolRegistry(
         }
 
         val coreNames = linkedSetOf(
-            "file_list", "file_read", "file_write", "file_delete", "workspace_grep",
-            "http_request", "python_exec", "shell_exec",
-            "memory_read", "memory_save", "system_hardware_status"
+            "file_list", "file_read", "memory_read", "memory_save"
         )
 
         var matchedDomainCount = 0
 
+        val wantsCodeOrShell = listOf(
+            "python", "script", "shell", "terminal", "bash", "code", "file", "write", "edit",
+            "csv", "pdf", "json", "grep", "server", "hardware", "ram", "rom",
+            "কোড", "স্ক্রিপ্ট", "পাইথন", "টার্মিনাল", "ফাইল"
+        ).any { lower.contains(it) }
+        if (wantsCodeOrShell || hasAttachments) {
+            coreNames.addAll(listOf("file_write", "file_delete", "workspace_grep", "http_request", "python_exec", "shell_exec", "system_hardware_status"))
+        }
+
         val wantsWeb = listOf(
-            "browser", "web", "http", "url", "search", "google", "site", "portal",
+            "browser", "web", "http", "url", "search", "google", "site", "portal", "chrome", "internet",
+            "online", "third party", "third-party", "movie", "cinema", "stream", "youtube", "watch",
             "gmail", "account", "signup", "sign up", "login", "sign in", "tiktok", "facebook", "instagram",
             "job", "apply", "remotive", "linkedin", "bdjobs", "html", "download", "server",
-            "ব্রাউজার", "ওয়েব", "সার্চ", "চাকরি", "জব", "এপ্লাই", "ডাউনলোড", "লিংক", "ওয়েবসাইট",
+            "ব্রাউজার", "ওয়েব", "সার্চ", "ক্রোম", "ইন্টারনেট", "থার্ড পার্টি", "অনলাইন", "মুভি", "সিনেমা",
+            "চাকরি", "জব", "এপ্লাই", "ডাউনলোড", "লিংক", "ওয়েবসাইট",
             "অ্যাকাউন্ট", "জিমেইল", "লগইন", "সাইন আপ"
         ).any { lower.contains(it) }
         if (wantsWeb) {
             matchedDomainCount++
             coreNames.addAll(
                 listOf(
-                    "browser_open_and_read", "browser_click", "browser_fill",
-                    "browser_scroll", "browser_eval_js", "browser_download",
+                    "browser_open_and_read", "browser_click", "browser_fill", "browser_batch",
+                    "browser_scroll", "browser_eval_js", "browser_download", "http_request",
                     "request_human_intervention", "local_server_control"
                 )
             )
         }
 
         val wantsVirtualHands = listOf(
-            "virtual hand", "app", "screen", "tap", "swipe", "scroll", "otp", "captcha",
-            "play store", "install", "launch", "share", "email", "dial", "call", "clipboard",
-            "gmail", "account", "signup", "login", "tiktok", "facebook", "instagram", "youtube", "upload",
-            "অ্যাপ", "স্ক্রিন", "ইনস্টল", "শেয়ার", "ইমেইল", "ওটিপি", "ক্যাপচা", "কল",
-            "অ্যাকাউন্ট", "জিমেইল", "লগইন", "আপলোড", "ভিডিও", "ছবি", "পিকচার"
+            "virtual", "hand", "app", "screen", "tap", "swipe", "scroll", "otp", "captcha", "popup",
+            "play store", "install", "launch", "share", "email", "dial", "call", "clipboard", "chrome",
+            "gmail", "account", "signup", "login", "tiktok", "facebook", "instagram", "youtube",
+            "upload", "thumbnail", "movie", "cinema", "download",
+            "ভার্চুয়াল", "অ্যাপ", "স্ক্রিন", "ইনস্টল", "শেয়ার", "ইমেইল", "ওটিপি", "ক্যাপচা", "কল", "পপআপ",
+            "অ্যাকাউন্ট", "জিমেইল", "লগইন", "আপলোড", "ভিডিও", "থাম্বনেল", "ছবি", "পিকচার", "মুভি", "সিনেমা"
         ).any { lower.contains(it) }
         if (wantsVirtualHands) {
             matchedDomainCount++
@@ -487,7 +568,7 @@ class ToolRegistry(
         ).any { lower.contains(it) }
         if (wantsSkills) {
             if (!hasImportedSkills) matchedDomainCount++
-            coreNames.addAll(listOf("skill_import_auto", "skill_list", "skill_load", "skill_delete"))
+            coreNames.addAll(listOf("skill_import_auto", "skill_search", "skill_list", "skill_load", "skill_delete"))
         }
 
         val wantsScheduleOrMedia = listOf(
@@ -497,6 +578,16 @@ class ToolRegistry(
         if (wantsScheduleOrMedia) {
             matchedDomainCount++
             coreNames.addAll(listOf("schedule_automation", "youtube_prepare_package"))
+        }
+
+        val wantsWhatsApp = listOf(
+            "whatsapp", "wa ", "antilink", "anti-link", "antisticker", "anti-sticker", "auto reply",
+            "autoreply", "group", "হোয়াটসঅ্যাপ", "হোয়াটসঅ্যাপ", "গ্রুপ", "এন্টিলিংক", "এন্টিস্টিকার",
+            "অটো মেসেজ", "অটো রিপ্লাই"
+        ).any { lower.contains(it) }
+        if (wantsWhatsApp) {
+            matchedDomainCount++
+            coreNames.addAll(listOf("wa_list_chats", "wa_read_chat", "wa_send_message", "wa_configure_chat"))
         }
 
         // If prompt is ambiguous or doesn't explicitly narrow to 1-2 domains, keep full toolset
@@ -660,16 +751,28 @@ class ToolRegistry(
                 val query = args.optString("url_or_query")
                 val res = browser.navigateAndWait(query)
                 res.fold(
-                    onSuccess = { snap ->
-                        val summary = """
-                            Title: ${snap.title}
-                            URL: ${snap.url}
-                            Page Text:
-                            ${snap.textContent.take(3000)}
-                            Links:
-                            ${snap.linksSummary.take(900)}
-                            Forms: ${snap.formsSummary}
-                        """.trimIndent()
+                    onSuccess = { initialSnap ->
+                        val clearedOverlay = browser.dismissCommonOverlays()
+                        val snap = if (!clearedOverlay.isNullOrBlank()) {
+                            delay(200)
+                            browser.extractCompactSummary() ?: initialSnap
+                        } else initialSnap
+                        val summary = buildString {
+                            if (!clearedOverlay.isNullOrBlank()) {
+                                append("[⚡ AutoPopupReflexBot cleared web overlay: '$clearedOverlay']\n")
+                            }
+                            append(
+                                """
+                                Title: ${snap.title}
+                                URL: ${snap.url}
+                                Page Text:
+                                ${snap.textContent.take(3000)}
+                                Links:
+                                ${snap.linksSummary.take(900)}
+                                Forms: ${snap.formsSummary}
+                                """.trimIndent()
+                            )
+                        }
                         val challenge = CommandSecurityGuard.detectHumanChallenge(snap.textContent, snap.url)
                         val intervention = challenge?.let { (cType, cReason) ->
                             HumanInterventionRequest(
@@ -677,7 +780,7 @@ class ToolRegistry(
                                 reason = cReason,
                                 targetMode = "BROWSER",
                                 urlOrPackage = snap.url,
-                                instructionForUser = "উপরের লাইভ ব্রাউজার স্ক্রিনে $cType সল্ভ করে 'সল্ভ সম্পন্ন' বাটনে ট্যাপ করুন।"
+                                instructionForUser = "উপরের লাইভ ব্রাউজার স্ক্রিনে $cType সল্ভ করে 'জমা দিন' বাটনে ট্যাপ করুন।"
                             )
                         }
                         ToolExecutionOutcome(toolName, true, summary, verified = true, interventionRequest = intervention)
@@ -695,9 +798,11 @@ class ToolRegistry(
                 if (!res.isSuccess) {
                     ToolExecutionOutcome(toolName, false, baseMsg)
                 } else {
+                    val clearedOverlay = browser.dismissCommonOverlays()
                     val snap = browser.extractCompactSummary()
                     val fullMsg = if (snap == null) baseMsg else {
-                        "$baseMsg\n\n[LIVE PAGE UPDATE]\nTitle: ${snap.title}\nURL: ${snap.url}\nText: ${snap.textContent.take(1800)}\nForms: ${snap.formsSummary}"
+                        val overlayTag = if (!clearedOverlay.isNullOrBlank()) "\n[⚡ AutoPopupReflexBot cleared web overlay: '$clearedOverlay']" else ""
+                        "$baseMsg$overlayTag\n\n[LIVE PAGE UPDATE]\nTitle: ${snap.title}\nURL: ${snap.url}\nText: ${snap.textContent.take(1800)}\nForms: ${snap.formsSummary}"
                     }
                     val challenge = snap?.let { CommandSecurityGuard.detectHumanChallenge(it.textContent, it.url) }
                     val intervention = challenge?.let { (cType, cReason) ->
@@ -721,7 +826,7 @@ class ToolRegistry(
             "browser_scroll" -> {
                 val dir = args.optString("direction", "down").lowercase()
                 val res = if (dir == "back") browser.goBack() else browser.scrollPage(dir)
-                if (res.isSuccess) delay(220)
+                if (res.isSuccess) delay(160)
                 val baseMsg = res.getOrElse { it.message ?: "Browser scroll failed" }
                 val snap = if (res.isSuccess) browser.extractCompactSummary() else null
                 val fullMsg = if (snap == null) baseMsg else {
@@ -729,6 +834,7 @@ class ToolRegistry(
                 }
                 ToolExecutionOutcome(toolName, res.isSuccess, fullMsg)
             }
+            "browser_batch" -> executeBrowserBatch(toolName, args.opt("steps"))
             "browser_eval_js" -> {
                 val script = args.optString("script")
                 val res = browser.evalCustomJs(script)
@@ -751,14 +857,16 @@ class ToolRegistry(
             }
             "app_launch" -> {
                 val query = args.optString("app_name_or_package")
+                val prevPkg = deviceController.activePackage.value
                 val res = deviceController.launchApp(query)
-                if (res.isSuccess) delay(420)
+                if (res.isSuccess) waitForUiSettle(prevPkg = prevPkg, maxWaitMs = 360L)
                 wrapActionWithLiveScreen(toolName, res)
             }
             "app_install_store" -> {
                 val query = args.optString("app_name_or_package")
+                val prevPkg = deviceController.activePackage.value
                 val res = deviceController.openPlayStoreForApp(query)
-                if (res.isSuccess) delay(520)
+                if (res.isSuccess) waitForUiSettle(prevPkg = prevPkg, maxWaitMs = 420L)
                 wrapActionWithLiveScreen(toolName, res)
             }
             "device_screen_inspect" -> formatScreenInspectResult(toolName)
@@ -784,11 +892,11 @@ class ToolRegistry(
                     args.optString("target"),
                     args.optString("body")
                 )
-                if (res.isSuccess && actionType.equals("share_file", ignoreCase = true)) {
-                    delay(450)
+                if (res.isSuccess && (actionType.equals("share_file", ignoreCase = true) || actionType.equals("share_multiple", ignoreCase = true))) {
+                    delay(420)
                     wrapActionWithLiveScreen(toolName, res)
                 } else {
-                    ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "Intent failed" })
+                    ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "Intent failed" }, verified = true)
                 }
             }
             "request_human_intervention" -> {
@@ -875,15 +983,26 @@ class ToolRegistry(
             "skill_import_auto" -> {
                 val source = args.optString("source")
                 val hint = args.optString("title_hint", "")
-                val res = skillManager.importAuto(source, hint)
+                val res = skillManager.importAutoBulk(source, hint)
                 res.fold(
-                    onSuccess = { sk ->
+                    onSuccess = { bulk ->
                         val summary = buildString {
-                            append("Auto-imported & configured skill '${sk.title}' (slug: ${sk.slug})\n")
-                            append("Detected Ecosystem: ${sk.ecosystem} | Size: ${sk.wordCount} words (${sk.lineCount} lines)\n")
-                            append("Entry Path: ${sk.entryPath}\n")
-                            if (sk.bundledFilesSummary.isNotBlank()) append("Bundled Files: ${sk.bundledFilesSummary}\n")
-                            append("Adapted Tools:\n${sk.toolMappingSummary}")
+                            if (bulk.importedCount == 1 && bulk.firstSkill != null) {
+                                val sk = bulk.firstSkill
+                                append("Auto-imported & configured skill '${sk.title}' (slug: ${sk.slug})\n")
+                                append("Detected Ecosystem: ${sk.ecosystem} | Size: ${sk.wordCount} words (${sk.lineCount} lines)\n")
+                                append("Entry Path: ${sk.entryPath}\n")
+                                if (sk.bundledFilesSummary.isNotBlank()) append("Bundled Files: ${sk.bundledFilesSummary}\n")
+                                append("Adapted Tools:\n${sk.toolMappingSummary}")
+                            } else {
+                                append("Bulk Auto-Import Completed [${bulk.modeLabel}]: ${bulk.importedCount} skills added")
+                                if (bulk.skippedCount > 0) append(" (${bulk.skippedCount} duplicates skipped)")
+                                append(".\n")
+                                if (bulk.sampleTitles.isNotEmpty()) {
+                                    append("Sample Skills: ${bulk.sampleTitles.joinToString(", ")}\n")
+                                }
+                                append("Use `skill_search(query=...)` and `skill_load(slug=...)` on demand — zero bloat.")
+                            }
                         }
                         ToolExecutionOutcome(toolName, true, summary, verified = true)
                     },
@@ -892,19 +1011,45 @@ class ToolRegistry(
                     }
                 )
             }
+            "skill_search" -> {
+                val query = args.optString("query", "").trim()
+                val limit = args.optInt("limit", 10).coerceIn(1, 25)
+                val all = repository.getEnabledImportedSkillsSnapshot()
+                val matches = skillManager.matchRelevantSkills(query, all, limit = limit)
+                val out = buildString {
+                    append("Smart Skill Search across ${all.size} enabled skills for '$query' (Found ${matches.size}):\n")
+                    if (matches.isEmpty()) {
+                        append("No matching imported skills found. Try broader keywords.")
+                    } else {
+                        matches.forEachIndexed { idx, m ->
+                            val sk = m.skill
+                            append("${idx + 1}. [${sk.slug}] ${sk.title} (${sk.ecosystem}, score=${m.score}, ${sk.wordCount}w): ${sk.description}\n")
+                        }
+                        append("\nCall `skill_load(slug=...)` on the best match to load & auto-hydrate full instructions.")
+                    }
+                }
+                ToolExecutionOutcome(toolName, true, out, verified = true)
+            }
             "skill_list" -> {
                 val filter = args.optString("filter", "").trim()
-                val imported = repository.getAllImportedSkillsSnapshot()
-                    .filter { filter.isBlank() || it.title.contains(filter, true) || it.slug.contains(filter, true) || it.ecosystem.contains(filter, true) }
+                val allImported = repository.getAllImportedSkillsSnapshot()
+                val imported = if (filter.isBlank()) {
+                    allImported
+                } else {
+                    skillManager.matchRelevantSkills(filter, allImported, limit = 30).map { it.skill }
+                }
                 val builtIn = AgentSkillRegistry.skills
                     .filter { filter.isBlank() || it.title.contains(filter, true) || it.subtitle.contains(filter, true) }
                 val out = buildString {
-                    append("=== IMPORTED UNIVERSAL SKILLS (${imported.size}) ===\n")
+                    append("=== IMPORTED UNIVERSAL SKILLS (Total: ${allImported.size}, Showing: ${imported.take(25).size}) ===\n")
                     if (imported.isEmpty()) {
-                        append("(No external skills imported yet. Use skill_import_auto to absorb any skill file, ZIP, or GitHub URL.)\n")
+                        append("(No matching external skills found. Use skill_import_auto to absorb any skill file, ZIP, or GitHub URL.)\n")
                     } else {
-                        imported.forEach { sk ->
-                            append("- [${sk.slug}] ${sk.title} (${sk.ecosystem}, ${sk.wordCount}w/${sk.lineCount}L, enabled=${sk.enabled}): ${sk.description}\n")
+                        imported.take(25).forEach { sk ->
+                            append("- [${sk.slug}] ${sk.title} (${sk.ecosystem}, ${sk.wordCount}w, enabled=${sk.enabled}): ${sk.description.take(100)}\n")
+                        }
+                        if (imported.size > 25) {
+                            append("... (${imported.size - 25} more skills. Use `skill_search(query=...)` to find specific ones.)\n")
                         }
                     }
                     append("\n=== BUILT-IN SKILLS (${builtIn.size}) ===\n")
@@ -1019,7 +1164,137 @@ class ToolRegistry(
                 }
                 ToolExecutionOutcome(toolName, true, out, verified = true)
             }
+            "wa_list_chats" -> {
+                val filter = args.optString("filter").trim().lowercase()
+                val chats = repository.getAllWhatsAppChatsSnapshot().filter { c ->
+                    when (filter) {
+                        "groups", "group" -> c.isGroup
+                        "dm", "dms", "contacts" -> !c.isGroup
+                        "" -> true
+                        else -> c.displayName.lowercase().contains(filter)
+                    }
+                }
+                val st = whatsAppBotEngine?.state?.value
+                val header = "WhatsApp Bot Status: Link=${st?.linkStatus?.label ?: "Unavailable"} | Background Notification=${st?.notificationAccessGranted ?: false} | Chats=${chats.size}"
+                val body = if (chats.isEmpty()) {
+                    "$header\nNo chats synced yet. Open 'WhatsApp AI Bot' screen to link via QR or phone code."
+                } else {
+                    header + "\n" + chats.take(40).joinToString("\n") { c ->
+                        "- [${if (c.isGroup) "GROUP" else "DM"}] ${c.displayName} | autoReply=${c.autoReplyEnabled} antiLink=${c.antiLinkEnabled} antiSticker=${c.antiStickerEnabled} | last='${c.lastMessagePreview.take(50)}'"
+                    }
+                }
+                ToolExecutionOutcome(toolName, true, body, verified = true)
+            }
+            "wa_read_chat" -> {
+                val name = args.optString("chat_name").trim()
+                val all = repository.getAllWhatsAppChatsSnapshot()
+                val matched = all.firstOrNull { it.displayName.equals(name, ignoreCase = true) }
+                    ?: all.firstOrNull { it.displayName.contains(name, ignoreCase = true) }
+                val isGroup = args.optBoolean("is_group", matched?.isGroup ?: false)
+                val key = matched?.chatKey ?: com.example.whatsapp.WaChatKeyHelper.normalize(name, isGroup)
+                val msgs = repository.getRecentWhatsAppMessages(key, limit = 16)
+                val out = if (msgs.isEmpty()) {
+                    "No stored messages yet for '$name'. If WhatsApp Web is linked, send or open the chat in WhatsApp Bot screen."
+                } else {
+                    "Conversation with ${matched?.displayName ?: name}:\n" + msgs.joinToString("\n") { m ->
+                        "${if (m.isFromMe) "Bot/Me" else m.senderName}: ${m.body}"
+                    }
+                }
+                ToolExecutionOutcome(toolName, true, out, verified = true)
+            }
+            "wa_send_message" -> {
+                val engine = whatsAppBotEngine
+                    ?: return ToolExecutionOutcome(toolName, false, "WhatsApp Bot Engine not initialized.")
+                val chatName = args.optString("chat_name").trim()
+                val msg = args.optString("message").trim()
+                val isGroup = args.optBoolean("is_group", false)
+                val composeAi = args.optBoolean("compose_with_ai", false)
+                val res = engine.sendManualOrAiMessage(chatName, isGroup, msg, composeAi)
+                ToolExecutionOutcome(toolName, res.isSuccess, res.getOrElse { it.message ?: "Send failed" }, verified = true)
+            }
+            "wa_configure_chat" -> {
+                val engine = whatsAppBotEngine
+                    ?: return ToolExecutionOutcome(toolName, false, "WhatsApp Bot Engine not initialized.")
+                val chatName = args.optString("chat_name").trim()
+                val existing = repository.getAllWhatsAppChatsSnapshot().firstOrNull {
+                    it.displayName.equals(chatName, ignoreCase = true) || it.displayName.contains(chatName, ignoreCase = true)
+                }
+                val isGroup = if (args.has("is_group")) args.optBoolean("is_group") else (existing?.isGroup ?: true)
+                val updated = engine.configureChatRules(
+                    chatName = existing?.displayName ?: chatName,
+                    isGroup = isGroup,
+                    autoReply = if (args.has("auto_reply")) args.optBoolean("auto_reply") else null,
+                    antiLink = if (args.has("anti_link")) args.optBoolean("anti_link") else null,
+                    antiSticker = if (args.has("anti_sticker")) args.optBoolean("anti_sticker") else null,
+                    antiForward = if (args.has("anti_forward")) args.optBoolean("anti_forward") else null,
+                    customTopicPrompt = if (args.has("custom_topic_prompt")) args.optString("custom_topic_prompt") else null
+                )
+                val summary = "Updated '${updated.displayName}' (${if (updated.isGroup) "Group" else "DM"}): autoReply=${updated.autoReplyEnabled}, antiLink=${updated.antiLinkEnabled}, antiSticker=${updated.antiStickerEnabled}, antiForward=${updated.antiForwardEnabled}"
+                ToolExecutionOutcome(toolName, true, summary, verified = true)
+            }
             else -> ToolExecutionOutcome(toolName, false, "Unknown tool: $toolName")
+        }
+    }
+
+    private suspend fun executeBrowserBatch(toolName: String, rawSteps: Any?): ToolExecutionOutcome {
+        val arr = when (rawSteps) {
+            is JSONArray -> rawSteps
+            is String -> runCatching { JSONArray(rawSteps.trim()) }.getOrNull()
+            else -> null
+        } ?: return ToolExecutionOutcome(toolName, false, "browser_batch 'steps' must be a JSON array.")
+        if (arr.length() == 0) return ToolExecutionOutcome(toolName, false, "browser_batch 'steps' is empty.")
+
+        val logs = mutableListOf<String>()
+        val maxSteps = arr.length().coerceAtMost(10)
+        for (i in 0 until maxSteps) {
+            val obj = arr.optJSONObject(i) ?: continue
+            val act = obj.optString("action").lowercase().trim()
+            val stepRes = when (act) {
+                "fill" -> browser.fillInput(obj.optString("field"), obj.optString("value"))
+                "click" -> browser.clickElement(obj.optString("target"))
+                "scroll" -> browser.scrollPage(obj.optString("direction", "down"))
+                "wait_ms" -> {
+                    delay(obj.optLong("value", 250L).coerceIn(50L, 4000L))
+                    Result.success("waited")
+                }
+                else -> Result.failure(IllegalArgumentException("Unknown browser step: $act"))
+            }
+            if (stepRes.isFailure) {
+                logs.add("${i + 1}. FAIL [$act]: ${stepRes.exceptionOrNull()?.message}")
+                val snap = browser.extractCompactSummary()
+                val msg = logs.joinToString("\n") + (snap?.let { "\n\n[LIVE PAGE UPDATE]\nTitle: ${it.title}\nURL: ${it.url}\nText: ${it.textContent.take(1500)}\nForms: ${it.formsSummary}" } ?: "")
+                return ToolExecutionOutcome(toolName, false, msg)
+            }
+            logs.add("${i + 1}. OK: ${stepRes.getOrNull()}")
+            delay(if (act == "click") 240L else 60L)
+        }
+        val snap = browser.extractCompactSummary()
+        val msg = "Browser batch ($maxSteps steps):\n" + logs.joinToString("\n") +
+            (snap?.let { "\n\n[LIVE PAGE UPDATE]\nTitle: ${it.title}\nURL: ${it.url}\nText: ${it.textContent.take(1700)}\nForms: ${it.formsSummary}" } ?: "")
+        val challenge = snap?.let { CommandSecurityGuard.detectHumanChallenge(it.textContent, it.url) }
+        val intervention = challenge?.let { (cType, cReason) ->
+            HumanInterventionRequest(
+                challengeType = cType,
+                reason = cReason,
+                targetMode = "BROWSER",
+                urlOrPackage = snap.url,
+                instructionForUser = "উপরের লাইভ ব্রাউজার স্ক্রিনে $cType সল্ভ করে অথবা প্রয়োজনীয় তথ্য লিখে 'জমা দিন' চাপুন।"
+            )
+        }
+        return ToolExecutionOutcome(toolName, true, msg, verified = true, interventionRequest = intervention)
+    }
+
+    private suspend fun waitForUiSettle(prevPkg: String, maxWaitMs: Long) {
+        val stepMs = 45L
+        var elapsed = 0L
+        while (elapsed < maxWaitMs) {
+            delay(stepMs)
+            elapsed += stepMs
+            val curPkg = deviceController.activePackage.value
+            if (curPkg != prevPkg && elapsed >= 90L) {
+                delay(70L)
+                return
+            }
         }
     }
 
@@ -1036,13 +1311,22 @@ class ToolRegistry(
                 "Screenshot is disabled. Use direct live screen reading via device_screen_inspect instead."
             )
         }
+        if (action == "auto_dismiss_popups") {
+            val cleared = botEngine?.autoDismissScreenPopups(maxRounds = 2).orEmpty()
+            val note = if (cleared.isNotEmpty()) {
+                "AutoPopupReflexBot dismissed: ${cleared.joinToString(" | ")}"
+            } else {
+                "No safe dismissible popup detected on screen."
+            }
+            return wrapActionWithLiveScreen(toolName, Result.success(note), runPopupReflex = false)
+        }
         if (action == "wait_ms") {
-            val ms = (arg1.toLongOrNull() ?: 450L).coerceIn(100L, 8_000L)
+            val ms = (arg1.toLongOrNull() ?: 350L).coerceIn(50L, 6_000L)
             delay(ms)
             return wrapActionWithLiveScreen(toolName, Result.success("Waited ${ms}ms"))
         }
         if (action == "wait_and_inspect") {
-            val ms = (arg1.toLongOrNull() ?: 400L).coerceIn(120L, 6_000L)
+            val ms = (arg1.toLongOrNull() ?: 300L).coerceIn(80L, 5_000L)
             delay(ms)
             return formatScreenInspectResult(toolName)
         }
@@ -1050,9 +1334,14 @@ class ToolRegistry(
             val res = deviceController.scrollToText(arg1)
             return wrapActionWithLiveScreen(toolName, res)
         }
+        val prevPkg = deviceController.activePackage.value
         val res = dispatchVirtualHandStep(action, arg1, arg2)
         if (res.isSuccess) {
-            delay(if (action == "launch_app" || action == "open_url") 380L else 180L)
+            if (action == "launch_app" || action == "open_url") {
+                waitForUiSettle(prevPkg = prevPkg, maxWaitMs = 340L)
+            } else {
+                delay(120L)
+            }
         }
         return wrapActionWithLiveScreen(toolName, res)
     }
@@ -1131,8 +1420,17 @@ class ToolRegistry(
         }
     }
 
-    private fun wrapActionWithLiveScreen(toolName: String, res: Result<String>): ToolExecutionOutcome {
+    private suspend fun wrapActionWithLiveScreen(
+        toolName: String,
+        res: Result<String>,
+        runPopupReflex: Boolean = true
+    ): ToolExecutionOutcome {
         val actionMsg = res.getOrElse { it.message ?: "Action failed" }
+        val autoCleared = if (res.isSuccess && runPopupReflex) {
+            botEngine?.autoDismissScreenPopups(maxRounds = 2).orEmpty()
+        } else {
+            emptyList()
+        }
         val inspect = deviceController.inspectScreen()
         if (inspect.isFailure) {
             return ToolExecutionOutcome(toolName, res.isSuccess, actionMsg)
@@ -1141,7 +1439,10 @@ class ToolRegistry(
         val pkg = deviceController.activePackage.value
         val size = deviceController.getScreenSizeLabel()
         val compactNodes = formatNodesCompact(nodes, size, pkg)
-        val combined = "$actionMsg\n\n[LIVE SCREEN UPDATE]\n$compactNodes"
+        val reflexBanner = if (autoCleared.isNotEmpty()) {
+            "\n[⚡ AutoPopupReflexBot auto-dismissed: ${autoCleared.joinToString(" | ")}]"
+        } else ""
+        val combined = "$actionMsg$reflexBanner\n\n[LIVE SCREEN UPDATE]\n$compactNodes"
         val challenge = CommandSecurityGuard.detectHumanChallenge(compactNodes, pkg)
         val intervention = challenge?.let { (cType, cReason) ->
             HumanInterventionRequest(

@@ -12,6 +12,8 @@ class AgentRepository(private val db: AppDatabase) : UniversalSkillManager.Skill
     private val bookmarkDao = db.bookmarkDao()
     private val usageDao = db.providerUsageDao()
     private val skillDao = db.importedSkillDao()
+    private val waChatDao = db.whatsAppChatDao()
+    private val waMessageDao = db.whatsAppMessageDao()
 
     val tasks: Flow<List<AgentTaskEntity>> = taskDao.observeAllTasks()
     val recentLogs: Flow<List<ExecutionLogEntity>> = logDao.observeRecentLogs()
@@ -20,9 +22,13 @@ class AgentRepository(private val db: AppDatabase) : UniversalSkillManager.Skill
     val bookmarks: Flow<List<BookmarkEntity>> = bookmarkDao.observeBookmarks()
     val providerUsage: Flow<List<ProviderUsageEntity>> = usageDao.observeUsage()
     val importedSkills: Flow<List<ImportedSkillEntity>> = skillDao.observeAllSkills()
+    val whatsAppChats: Flow<List<WhatsAppChatEntity>> = waChatDao.observeAllChats()
+    val whatsAppActivity: Flow<List<WhatsAppMessageEntity>> = waMessageDao.observeRecentActivity()
 
     fun observeTask(taskId: Long): Flow<AgentTaskEntity?> = taskDao.observeTask(taskId)
     fun observeLogsForTask(taskId: Long): Flow<List<ExecutionLogEntity>> = logDao.observeLogsForTask(taskId)
+    fun observeWhatsAppMessages(chatKey: String): Flow<List<WhatsAppMessageEntity>> =
+        waMessageDao.observeMessagesForChat(chatKey)
 
     suspend fun getTask(taskId: Long): AgentTaskEntity? = taskDao.getTaskById(taskId)
     suspend fun getRecentTasksSnapshot(limit: Int = 10): List<AgentTaskEntity> = taskDao.getRecentTasksSnapshot(limit)
@@ -116,7 +122,22 @@ class AgentRepository(private val db: AppDatabase) : UniversalSkillManager.Skill
     override suspend fun getAllImportedSkillsSnapshot(): List<ImportedSkillEntity> = skillDao.getAllSkillsSnapshot()
     override suspend fun getImportedSkillBySlug(slug: String): ImportedSkillEntity? = skillDao.getSkillBySlug(slug)
     override suspend fun upsertImportedSkill(skill: ImportedSkillEntity) = skillDao.upsertSkill(skill)
+    override suspend fun upsertImportedSkills(skills: List<ImportedSkillEntity>) = skillDao.upsertSkills(skills)
     override suspend fun deleteImportedSkill(slug: String) = skillDao.deleteSkill(slug)
+    override suspend fun clearAllImportedSkills() = skillDao.clearAllSkills()
+
+    suspend fun getAllWhatsAppChatsSnapshot(): List<WhatsAppChatEntity> = waChatDao.getAllChatsSnapshot()
+    suspend fun getWhatsAppChatByKey(chatKey: String): WhatsAppChatEntity? = waChatDao.getChatByKey(chatKey)
+    suspend fun upsertWhatsAppChat(chat: WhatsAppChatEntity) = waChatDao.upsertChat(chat)
+    suspend fun deleteWhatsAppChat(chatKey: String) {
+        waMessageDao.deleteMessagesForChat(chatKey)
+        waChatDao.deleteChat(chatKey)
+    }
+
+    suspend fun getRecentWhatsAppMessages(chatKey: String, limit: Int = 14): List<WhatsAppMessageEntity> =
+        waMessageDao.getRecentMessagesForChat(chatKey, limit).asReversed()
+
+    suspend fun insertWhatsAppMessage(msg: WhatsAppMessageEntity): Long = waMessageDao.insertMessage(msg)
 
     suspend fun clearAllUserData() {
         logDao.clearAllLogs()
@@ -124,5 +145,7 @@ class AgentRepository(private val db: AppDatabase) : UniversalSkillManager.Skill
         memoryDao.clearAllMemory()
         usageDao.clearUsage()
         skillDao.clearAllSkills()
+        waMessageDao.clearAllMessages()
+        waChatDao.clearAllChats()
     }
 }

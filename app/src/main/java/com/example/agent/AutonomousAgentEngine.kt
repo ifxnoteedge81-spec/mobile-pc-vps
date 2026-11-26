@@ -66,6 +66,7 @@ class AutonomousAgentEngine(
     private val resourceManager: DeviceResourceManager,
     private val skillManager: UniversalSkillManager,
     private val settingsFlow: kotlinx.coroutines.flow.Flow<AppSettings>,
+    private val botEngine: ZeroLatencyBotEngine? = null,
     private val onInterventionAlert: (HumanInterventionRequest) -> Unit = {}
 ) {
     private val _state = MutableStateFlow(AgentRuntimeState())
@@ -268,8 +269,50 @@ class AutonomousAgentEngine(
             repository.appendLog(taskId, 0, "RESOURCE", "Resource Guard", resources.warningMessage)
         }
 
+        // Zero-Second Multi-Bot Dispatch (t = 0ms): executes direct gestures/app opens instantly,
+        // or pre-warms target app / share composer / signup page while Cloud AI prepares next steps.
+        val botResult = botEngine?.tryInstantOrPrewarm(userPrompt.trim(), attachments, settings.fullAutonomousMode)
+        if (botResult != null) {
+            repository.appendLog(taskId, 0, "TOOL_RESULT", "${botResult.botName} (0ms)", botResult.summary, verified = true)
+            appendFeed(
+                kind = FeedEntryKind.VERIFIED_TOOL_RESULT,
+                title = "⚡ ${botResult.botName}",
+                body = botResult.summary
+            )
+            if (botResult.handledCompletely) {
+                sessionTurns.add(AiMessage(role = "user", content = displayUserText.take(800)))
+                sessionTurns.add(AiMessage(role = "assistant", content = botResult.summary))
+                while (sessionTurns.size > 12) sessionTurns.removeAt(0)
+                repository.getTask(taskId)?.let {
+                    repository.updateTask(
+                        it.copy(
+                            status = TaskStatus.COMPLETED,
+                            finalReport = botResult.summary,
+                            modelUsed = "Zero-Second Local Bot (${botResult.botName})"
+                        )
+                    )
+                }
+                _state.update {
+                    it.copy(
+                        isBusy = false,
+                        taskStatus = TaskStatus.COMPLETED,
+                        activeModelLabel = "⚡ ${botResult.botName}",
+                        currentPhaseLabel = "Completed in 0s (Local Bot)",
+                        streamingBuffer = ""
+                    )
+                }
+                return
+            }
+        }
+
+        val finalUserTurnPrompt = if (botResult != null && botResult.preExecutedContext.isNotBlank()) {
+            "$enrichedPrompt\n\n=== ZERO-SECOND BOT PRE-EXECUTION ===\n${botResult.preExecutedContext}"
+        } else {
+            enrichedPrompt
+        }
+
         // Sub-5-second fast path for simple greetings & short conversational questions
-        if (isFastChat) {
+        if (isFastChat && botResult == null) {
             val fastPrompt = "You are Personal AI Computer, a helpful, ultra-fast autonomous AI computer assistant. Reply naturally, concisely, and warmly in the user's language (Bangla or English)."
             val conversation = mutableListOf<AiMessage>().apply {
                 addAll(sessionTurns.takeLast(4))
@@ -332,50 +375,91 @@ class AutonomousAgentEngine(
 
         val memories = repository.getMemorySnapshot()
         val memoryContext = if (memories.isEmpty()) "None saved yet."
-        else memories.take(25).joinToString("\n") { "- [${it.category}] ${it.memoryKey}: ${it.content.take(260)}" }
+        else memories.take(12).joinToString("\n") { "- [${it.category}] ${it.memoryKey}: ${it.content.take(200)}" }
 
-        val recentTasks = repository.getRecentTasksSnapshot(8)
+        val recentTasks = repository.getRecentTasksSnapshot(6)
             .filter { it.id != taskId && it.finalReport.isNotBlank() }
-            .take(6)
+            .take(4)
         val continuityContext = if (recentTasks.isEmpty()) "None yet."
         else recentTasks.reversed().joinToString("\n") { t ->
-            "- User: ${t.prompt.take(180)} -> Result: ${t.finalReport.take(240)}"
+            "- User: ${t.prompt.take(160)} -> Result: ${t.finalReport.take(200)}"
         }
 
         val importedSkills = repository.getEnabledImportedSkillsSnapshot()
+        val matchedSkills = if (importedSkills.isEmpty()) {
+            emptyList()
+        } else {
+            skillManager.matchRelevantSkills(userPrompt, importedSkills, limit = 6)
+        }
         val importedSkillsIndex = if (importedSkills.isEmpty()) {
             "None imported yet."
+        } else if (matchedSkills.isEmpty()) {
+            "Total Imported: ${importedSkills.size} skills (use `skill_search(query=...)` if a specialized skill is needed)."
         } else {
-            importedSkills.take(30).joinToString("\n") { sk ->
-                "- [${sk.slug}] ${sk.title} (${sk.ecosystem}, ${sk.wordCount} words/${sk.lineCount} lines): ${sk.description.take(160)}"
-            }
+            "Total Imported: ${importedSkills.size} | Auto-Matched Top ${matchedSkills.size}:\n" +
+                matchedSkills.joinToString("\n") { m ->
+                    val sk = m.skill
+                    "- [${sk.slug}] ${sk.title} (${sk.ecosystem}, ${sk.wordCount}w): ${sk.description.take(140)}"
+                }
         }
 
         val attachmentHint = if (attachments.any { skillManager.looksLikeSkillFile(it.displayName, it.textExcerpt) }) {
-            "\nNOTE: User attached file(s) that look like an external AI skill. If user wants to add/install/use them as skills, immediately call `skill_import_auto(source=\"uploads/...\")` on the file's relative path so all bundled instructions (even 10,000+ lines) are permanently absorbed!"
+            "\nNOTE: User attached skill file(s). If user wants to add/use them, call `skill_import_auto(source=\"uploads/...\")`."
         } else ""
 
-        val systemPrompt = """
+        val complexity = classifyComplexity(finalUserTurnPrompt)
+        val isUiFastTurn = complexity == TaskComplexity.MULTISTEP_AGENT && !isCodingOrCadPrompt(userPrompt)
+        val vhStatus = if (com.example.accessibility.PersonalAiAccessibilityService.isConnected.value) "CONNECTED" else "NOT ENABLED"
+
+        val systemPrompt = if (isUiFastTurn) {
+            """
+            You are PERSONAL AI COMPUTER — The AI Brain orchestrating Zero-Latency Local Bots across ALL Android Apps, Internet Websites, and Virtual World tasks. Reply concisely in the user's language (Bangla or English).
+            Execute tools immediately until finished. Do NOT narrate unnecessary steps.
+            RULES:
+            1. BRAIN + ZERO-LATENCY BOTS SYNERGY:
+               - AutoPopupReflexBot already clears Allow/Skip/Later/NotNow/Cookie overlays automatically. Never waste turns manually dismissing simple nag popups unless one remains.
+               - NO SCREENSHOTS: Never call `screenshot`. Read live UI hierarchy directly (`device_screen_inspect` or `[LIVE SCREEN UPDATE]`) and live browser DOM (`browser_open_and_read`, `browser_batch`).
+            2. UNIVERSAL APP + INTERNET FALLBACK:
+               - If searching/downloading in any app (e.g., MovieBox, YouTube, etc.) fails or returns no result, IMMEDIATELY switch to Live Browser (`browser_open_and_read`, `browser_download`) or phone Chrome (`app_launch("chrome")` / `device_intent_action("url", ...)`).
+            3. MULTI-ACTION BATCHING (1-2 MIN MAX):
+               - App UI: use `device_virtual_hand(action="batch", steps="[...]")` to bundle 2-10 taps/inputs/scrolls in ONE turn!
+               - Browser forms: use `browser_batch(steps="[...]")` to fill multiple inputs + click Next/Submit in ONE turn!
+            4. MULTI-MEDIA & THUMBNAIL TARGETING (MultiMediaTargetBot):
+               - MultiMediaTargetBot pre-shares the primary video/photo AND stages secondary/thumbnail images at the top of Android Gallery (`Pictures/AI Computer`). Use `device_intent_action(action_type="stage_gallery", target="uploads/...")` if needed later, and when picking a Thumbnail or secondary photo, select that staged filename or tap the FIRST newest gallery tile!
+            5. AUTONOMOUS ACCOUNT CREATION & LOGIN (GMAIL/WEB/APPS):
+               - Fill Name, Birthday, Gender, Username, Password directly (`browser_batch`/`browser_fill` or `device_virtual_hand`).
+               - Whenever Phone Number, SMS OTP, CAPTCHA, or human verification is needed, IMMEDIATELY call `request_human_intervention` (`target_mode="BROWSER"` or `"VIRTUAL_HANDS"`) telling the user what to enter in the Live Screen box or solve on screen and tap 'জমা দিন'. Use `[HUMAN_INTERVENTION_RESOLVED]` immediately on resume.
+            6. SELF-HEALING: If a selector fails, use text/hint/scroll or `browser_eval_js`.
+            7. WHATSAPP AI MANAGEMENT BOT (NO EXTERNAL APP SWITCH NEEDED): Use `wa_list_chats`, `wa_read_chat`, `wa_send_message`, and `wa_configure_chat` to inspect previous conversations, send direct or AI-composed messages to any contact or group, and toggle Auto-Reply / Anti-Link / Anti-Sticker per group or contact directly inside the app.$attachmentHint
+
+            Virtual Hands: $vhStatus | Tier: ${resources.deviceTierLabel}
+            Skills: $importedSkillsIndex
+            Memory: $memoryContext
+            Recent: $continuityContext
+            """.trimIndent()
+        } else {
+            """
             You are PERSONAL AI COMPUTER, a next-generation autonomous Android & Online Engineering AI OS designed to surpass standard agents in reliability, hardware adaptability, and real execution depth.
             You control real on-device tools:
             • Code & Terminal: Linux shell (`shell_exec`), Python 3 (`python_exec`), V8 JS/TS (`js_exec`), multi-file search (`workspace_grep`), file I/O (`file_list`, `file_read`, `file_write`, `file_delete`), local HTTP server (`local_server_control`).
             • CAD & Engineering Design: `cad_generate_drawing` creates real AutoCAD ASCII DXF (`.dxf`), dimensioned SVG Blueprints (`.svg`), interactive pan/zoom HTML viewers (`_viewer.html`), AND 3D CAD `.stl` meshes for ANY architectural floor plan, mechanical bracket, gear, PCB, civil drawing, or custom geometry!
-            • Web & Research: Fast HTTPS (`http_request`) + Live Chromium Browser (`browser_open_and_read`, `browser_click`, `browser_fill`, `browser_scroll`, `browser_eval_js`, `browser_download`).
-            • Full Phone Virtual Hands (NO Screenshots — Direct Live Screen Reading): `app_list`, `app_launch`, `app_install_store`, `device_screen_inspect`, `device_virtual_hand` (supports `action="batch"` with `steps` JSON array to run 2-10 UI actions in ONE turn, and EVERY UI action automatically returns the updated live screen elements!), `device_clipboard`, `device_intent_action` (`share_file` directly sends `uploads/...` photos/videos into TikTok/WhatsApp/etc. in 1 tap!).
+            • Web & Research: Fast HTTPS (`http_request`) + Live Chromium Browser (`browser_open_and_read`, `browser_click`, `browser_fill`, `browser_batch`, `browser_scroll`, `browser_eval_js`, `browser_download`).
+            • Full Phone Virtual Hands + Integrated Bots (NO Screenshots): `app_list`, `app_launch`, `app_install_store`, `device_screen_inspect`, `device_virtual_hand` (`batch` for 2-10 actions in 1 turn + `auto_dismiss_popups` — AutoPopupReflexBot also auto-clears Allow/Skip/Later popups automatically!), `device_clipboard`, `device_intent_action` (`share_file`, `share_multiple`, `stage_gallery` for Thumbnail/Photo Picker targeting!).
             • Universal Auto-Skill Adapter: `skill_import_auto`, `skill_list`, `skill_load`, `skill_delete` (absorbs any Anthropic/OpenClaw/MCP/Gemini/ZIP/10,000+ line skill automatically).
             • Hardware & Memory: `system_hardware_status`, `memory_read`, `memory_save`, `schedule_automation`.
 
-            CORE EXECUTION RULES (ULTRA-FAST AUTONOMY + DIRECT SCREEN READING):
+            CORE EXECUTION RULES (BRAIN + ZERO-LATENCY BOTS + DIRECT SCREEN READING):
             1. Reply in the user's language (Bangla or English). Execute real tool calls directly until the goal is completely finished and verified.
             2. DOCUMENT & PDF READING:
                - For ANY `.pdf`, `.docx`, `.txt`, `.csv`, or `.json` file (such as a CV/Resume in `uploads/`), call `file_read(path="uploads/...")` directly — `file_read` has a built-in PDF/DOCX text extractor! Or in Python use `extract_pdf_text("uploads/...")`.
-            3. ULTRA-FAST VIRTUAL HANDS (TARGET 1-2 MIN MAX, NEVER TAKE SCREENSHOTS):
+            3. ULTRA-FAST VIRTUAL HANDS & UNIVERSAL WEB FALLBACK:
                - NEVER take screenshots (`screenshot` is disabled). Read the live screen UI hierarchy directly (`device_screen_inspect`, or read `[LIVE SCREEN UPDATE]` returned automatically after every Virtual Hand / `app_launch` action!).
-               - When filling multiple fields or tapping predictable sequences (e.g., typing name + tapping Next, or Next -> Next -> Caption -> Post), ALWAYS combine them using `device_virtual_hand(action="batch", steps="[...]")` so 3-8 UI actions finish in ONE single turn!
-               - When uploading an attached photo/video from `uploads/` to TikTok, Instagram, Facebook, or another app: first try `device_intent_action(action_type="share_file", target="uploads/...", body="<AppName>")` to jump straight into that app's Share/Upload composer in 1 step, then batch-tap Next/Post via `device_virtual_hand`!
+               - AutoPopupReflexBot clears Allow/Skip/Later/Cookie popups automatically. Always combine multi-step UI or form sequences via `device_virtual_hand(action="batch", steps="[...]")` or `browser_batch(steps="[...]")`.
+               - For multi-file uploads (e.g. Video + Thumbnail on YouTube/Social): MultiMediaTargetBot shares primary media and stages secondary/thumbnail images in Android Gallery (`Pictures/AI Computer`). Use `stage_gallery` if needed so Photo Pickers show the thumbnail first!
+               - For ANY search/download across apps & internet: if not found in an app, immediately fall back to Live Browser (`browser_open_and_read` / `browser_download`) or phone Chrome!
             4. AUTONOMOUS ACCOUNT CREATION & LOGIN (GMAIL / GOOGLE / WEB / APPS):
                - If asked to create an account (e.g., Gmail/Google account -> `browser_open_and_read("https://accounts.google.com/signup")` OR Settings/Gmail app via Virtual Hands) or log in anywhere:
-               - Inspect fields and fill Name, Birthday, Gender, Username, Password directly (`browser_fill` or `device_virtual_hand` `type` / `batch`, including password fields when requested by user).
+               - Inspect fields and fill Name, Birthday, Gender, Username, Password directly (`browser_fill`, `browser_batch`, or `device_virtual_hand` `type` / `batch`, including password fields when requested by user).
                - Whenever Phone Number, SMS OTP, CAPTCHA, or personal verification info is needed from the user, IMMEDIATELY call `request_human_intervention` (`target_mode="BROWSER"` or `"VIRTUAL_HANDS"`) with a clear question in `instruction_for_user` telling the user what to type in the Live Screen input box (e.g., phone number or OTP) or solve on screen and tap 'জমা দিন'. Once resumed, read `[HUMAN_INTERVENTION_RESOLVED]: ...`, enter that value immediately, and finish creating the account!
             5. CV-TO-JOB SEARCH & APPLICATION WORKFLOW:
                - Extract candidate skills/experience from CV -> search live jobs via `browser_open_and_read` -> fill applications -> call `request_human_intervention` for CAPTCHA/OTP/final submission.
@@ -390,7 +474,7 @@ class AutonomousAgentEngine(
             10. MEMORY CONTINUITY:
                - Call `memory_save` for user preferences & project facts (never save passwords/OTPs).$attachmentHint
 
-            Device Tier: ${resources.deviceTierLabel} | RAM: ${resources.availableRamMb}/${resources.totalPhysicalRamMb} MB (Budget: ${settings.ramBudgetMb} MB) | Workspace ROM: ${"%.1f".format(resources.virtualEnvUsedMb)}/${settings.storageQuotaMb} MB | Virtual Hands: ${if (com.example.accessibility.PersonalAiAccessibilityService.isConnected.value) "CONNECTED" else "NOT ENABLED"}
+            Device Tier: ${resources.deviceTierLabel} | RAM: ${resources.availableRamMb}/${resources.totalPhysicalRamMb} MB (Budget: ${settings.ramBudgetMb} MB) | Workspace ROM: ${"%.1f".format(resources.virtualEnvUsedMb)}/${settings.storageQuotaMb} MB | Virtual Hands: $vhStatus
             Imported Auto-Skills Index:
             $importedSkillsIndex
 
@@ -399,17 +483,17 @@ class AutonomousAgentEngine(
 
             Recent Conversation & Task Continuity (Previous Chats):
             $continuityContext
-        """.trimIndent()
+            """.trimIndent()
+        }
 
         // Include recent session conversation turns (clean user/assistant context) + current user command (with inline vision images if any)
         val conversation = mutableListOf<AiMessage>().apply {
             addAll(sessionTurns.takeLast(8))
-            add(AiMessage(role = "user", content = enrichedPrompt, imageAttachments = promptImages))
+            add(AiMessage(role = "user", content = finalUserTurnPrompt, imageAttachments = promptImages))
         }
 
-        val complexity = classifyComplexity(enrichedPrompt)
         val declarations = toolRegistry.getDeclarationsForPrompt(
-            userPrompt = enrichedPrompt,
+            userPrompt = finalUserTurnPrompt,
             hasAttachments = attachments.isNotEmpty(),
             hasImportedSkills = importedSkills.isNotEmpty()
         )
@@ -698,27 +782,37 @@ class AutonomousAgentEngine(
         val actionKeywords = listOf(
             "file", "upload", "pdf", "python", "script", "shell", "terminal", "bash",
             "code", "html", "autocad", "cad", "dxf", "stl", "3d", "blueprint", "floor plan",
-            "browser", "open", "click", "search", "google", "http", "url", "website",
-            "job", "apply", "cv", "resume", "youtube", "video", "app", "install", "launch",
-            "virtual hand", "screen", "tap", "swipe", "skill", "import", "github", "memory",
-            "schedule", "server", "ram", "rom", "hardware", "download", "write", "create", "build",
+            "browser", "chrome", "open", "click", "search", "google", "http", "url", "website", "internet",
+            "job", "apply", "cv", "resume", "youtube", "video", "thumbnail", "movie", "cinema", "stream",
+            "app", "install", "launch", "virtual", "screen", "tap", "swipe", "skill", "import", "github", "memory",
+            "schedule", "server", "ram", "rom", "hardware", "download", "write", "create", "build", "share",
             "run", "execute", "delete", "list", "check", "find",
-            "ফাইল", "সিভি", "জব", "চাকরি", "এপ্লাই", "স্ক্রিপ্ট", "ব্রাউজার", "ড্রয়িং", "ডিজাইন",
-            "অ্যাপ", "ইনস্টল", "ডাউনলোড", "স্কিল", "সার্চ", "তৈরি", "বানাও", "খোলো", "করো", "দাও", "চেক"
+            "ফাইল", "সিভি", "জব", "চাকরি", "এপ্লাই", "স্ক্রিপ্ট", "ব্রাউজার", "ক্রোম", "ড্রয়িং", "ডিজাইন",
+            "অ্যাপ", "ইনস্টল", "ডাউনলোড", "স্কিল", "সার্চ", "তৈরি", "বানাও", "খোলো", "করো", "দাও", "চেক",
+            "মুভি", "সিনেমা", "থাম্বনেল", "শেয়ার", "ইন্টারনেট", "ভার্চুয়াল", "ওয়েব"
         )
         if (actionKeywords.any { lower.contains(it) }) return false
         return trimmedPrompt.split(Regex("\\s+")).size <= 10
     }
 
+    private fun isCodingOrCadPrompt(prompt: String): Boolean {
+        val lower = prompt.lowercase()
+        return lower.contains("script") || lower.contains("python") || lower.contains("code") ||
+            lower.contains("html") || lower.contains("shell") || lower.contains("bash") ||
+            lower.contains("autocad") || lower.contains("dxf") || lower.contains("cad") || lower.contains("stl")
+    }
+
     private fun classifyComplexity(prompt: String): TaskComplexity {
         val lower = prompt.lowercase()
         return when {
-            lower.contains("script") || lower.contains("python") || lower.contains("code") || lower.contains("html") ||
-                lower.contains("autocad") || lower.contains("dxf") || lower.contains("cad") || lower.contains("stl") -> TaskComplexity.CODING
+            isCodingOrCadPrompt(prompt) -> TaskComplexity.CODING
             lower.contains("job") || lower.contains("youtube") || lower.contains("research") || lower.contains("automate") ||
-                lower.contains("virtual hand") || lower.contains("app") || lower.contains("design") ||
+                lower.contains("virtual") || lower.contains("app") || lower.contains("design") ||
                 lower.contains("gmail") || lower.contains("account") || lower.contains("tiktok") || lower.contains("upload") ||
-                lower.contains("জিমেইল") || lower.contains("অ্যাকাউন্ট") || lower.contains("আপলোড") -> TaskComplexity.MULTISTEP_AGENT
+                lower.contains("chrome") || lower.contains("browser") || lower.contains("website") || lower.contains("internet") ||
+                lower.contains("movie") || lower.contains("cinema") || lower.contains("download") || lower.contains("thumbnail") ||
+                lower.contains("জিমেইল") || lower.contains("অ্যাকাউন্ট") || lower.contains("আপলোড") ||
+                lower.contains("মুভি") || lower.contains("সিনেমা") || lower.contains("ক্রোম") || lower.contains("থাম্বনেল") -> TaskComplexity.MULTISTEP_AGENT
             lower.length > 180 -> TaskComplexity.REASONING
             else -> TaskComplexity.SIMPLE
         }

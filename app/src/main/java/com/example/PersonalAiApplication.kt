@@ -48,10 +48,28 @@ class AppContainer(context: Context) {
     val deviceController = DeviceAutomationController(context)
     val workScheduler = AgentWorkScheduler(context)
     val universalSkillManager = UniversalSkillManager(workspaceManager, repository, auditLogger)
+    val zeroLatencyBots = com.example.agent.ZeroLatencyBotEngine(
+        deviceController = deviceController,
+        browserController = browserController,
+        skillManager = universalSkillManager,
+        repository = repository,
+        workspace = workspaceManager
+    )
 
     val geminiProvider = GeminiProvider(auditLogger)
     val openRouterProvider = OpenRouterProvider(auditLogger)
     val aiRouter = AiModelRouter(context, keyStore, geminiProvider, openRouterProvider, repository)
+    val updateChecker = com.example.runtime.AppUpdateChecker(context, auditLogger)
+
+    val whatsAppWebBridge = com.example.whatsapp.WhatsAppWebBridge(context, appScope, auditLogger)
+    val whatsAppBotEngine = com.example.whatsapp.WhatsAppBotEngine(
+        context = context,
+        scope = appScope,
+        repository = repository,
+        settingsStore = settingsStore,
+        aiRouter = aiRouter,
+        webBridge = whatsAppWebBridge
+    )
 
     val toolRegistry = ToolRegistry(
         workspace = workspaceManager,
@@ -64,7 +82,9 @@ class AppContainer(context: Context) {
         browser = browserController,
         deviceController = deviceController,
         repository = repository,
-        skillManager = universalSkillManager
+        skillManager = universalSkillManager,
+        botEngine = zeroLatencyBots,
+        whatsAppBotEngine = whatsAppBotEngine
     )
 
     val agentEngine = AutonomousAgentEngine(
@@ -76,6 +96,7 @@ class AppContainer(context: Context) {
         resourceManager = resourceManager,
         skillManager = universalSkillManager,
         settingsFlow = settingsStore.settings,
+        botEngine = zeroLatencyBots,
         onInterventionAlert = { req ->
             com.example.scheduler.AgentForegroundService.postInterventionNotification(
                 context = context,

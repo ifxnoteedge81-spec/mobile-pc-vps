@@ -3,6 +3,7 @@ package com.example.ui.navigation
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Computer
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.History
@@ -26,6 +27,7 @@ sealed class AppDestination(
 ) {
     data object Home : AppDestination("home", "Home Dashboard", "Home", Icons.Filled.Home, true)
     data object CommandCenter : AppDestination("command_center", "AI Command Center", "Agent", Icons.Filled.AutoAwesome, true)
+    data object WhatsAppBot : AppDestination("whatsapp_bot", "WhatsApp AI Bot", "WA Bot", Icons.Filled.Chat)
     data object VirtualDesktop : AppDestination("virtual_desktop", "Virtual Desktop", "Desktop", Icons.Filled.Computer, true)
     data object Browser : AppDestination("browser", "Browser Workspace", "Browser", Icons.Filled.Language, true)
     data object Terminal : AppDestination("terminal", "Linux Terminal", "Terminal", Icons.Filled.Terminal, true)
@@ -43,6 +45,7 @@ sealed class AppDestination(
         val allDestinations = listOf(
             Home,
             CommandCenter,
+            WhatsAppBot,
             VirtualDesktop,
             Browser,
             Terminal,

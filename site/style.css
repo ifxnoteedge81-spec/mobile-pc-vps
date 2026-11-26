@@ -87,6 +87,16 @@ h1 { margin: 0; font-size: 1.75rem; letter-spacing: 0.03em; }
   pointer-events: none;
 }
 
+.btn-secondary {
+  display: inline-block;
+  padding: 11px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  color: var(--cyan);
+  font-weight: 600;
+  text-decoration: none;
+}
+
 .status-pill {
   padding: 6px 12px;
   border-radius: 999px;

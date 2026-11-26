@@ -19,27 +19,33 @@ class GeminiProvider(
     private val auditLogger: NetworkAuditLogger
 ) {
     private val client = OkHttpClient.Builder()
-        .connectTimeout(8, TimeUnit.SECONDS)
-        .readTimeout(28, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(35, TimeUnit.SECONDS)
         .writeTimeout(15, TimeUnit.SECONDS)
         .build()
 
     private val discoveryClient = OkHttpClient.Builder()
-        .connectTimeout(6, TimeUnit.SECONDS)
-        .readTimeout(8, TimeUnit.SECONDS)
+        .connectTimeout(7, TimeUnit.SECONDS)
+        .readTimeout(9, TimeUnit.SECONDS)
         .build()
 
-    @Volatile
-    private var cachedModelsFetchedAt: Long = 0L
-    @Volatile
-    private var cachedDiscoveredModels: List<GeminiModelInfo> = emptyList()
+    private val cachedModelsByKey = java.util.concurrent.ConcurrentHashMap<Int, Pair<Long, List<GeminiModelInfo>>>()
+
+    fun clearCache() {
+        cachedModelsByKey.clear()
+    }
 
     suspend fun fetchAvailableModels(apiKey: String, forceRefresh: Boolean = false): Result<List<GeminiModelInfo>> =
         withContext(Dispatchers.IO) {
             val cleanKey = SecureKeyStore.sanitizeSecret(apiKey)
-            val freshCache = System.currentTimeMillis() - cachedModelsFetchedAt < 30 * 60_000L
-            if (!forceRefresh && freshCache && cachedDiscoveredModels.isNotEmpty()) {
-                return@withContext Result.success(cachedDiscoveredModels)
+            if (cleanKey.isBlank()) {
+                return@withContext Result.failure(IllegalArgumentException("Gemini API key is empty."))
+            }
+            val keyHash = cleanKey.hashCode()
+            val cached = cachedModelsByKey[keyHash]
+            val freshCache = cached != null && (System.currentTimeMillis() - cached.first) < 30 * 60_000L
+            if (!forceRefresh && freshCache && cached!!.second.isNotEmpty()) {
+                return@withContext Result.success(cached.second)
             }
             runCatching {
                 val request = Request.Builder()
@@ -62,7 +68,7 @@ class GeminiProvider(
                         val supportsGen = (0 until methods.length()).any { methods.optString(it) == "generateContent" }
                         if (!supportsGen) continue
                         val lower = id.lowercase()
-                        // Exclude non-tool-capable or media/embedding models (e.g. gemma, learnlm, imagen, tts, thinking-exp)
+                        // Exclude non-tool-capable or media/embedding models
                         if (!lower.startsWith("gemini-") ||
                             lower.contains("embedding") ||
                             lower.contains("imagen") ||
@@ -81,8 +87,7 @@ class GeminiProvider(
                         list.add(GeminiModelInfo(id = id, displayName = displayName, inputTokenLimit = inputLimit))
                     }
                     val sorted = list.sortedByDescending { scoreGeminiModel(it.id, TaskComplexity.MULTISTEP_AGENT, true) }
-                    cachedModelsFetchedAt = System.currentTimeMillis()
-                    cachedDiscoveredModels = sorted
+                    cachedModelsByKey[keyHash] = System.currentTimeMillis() to sorted
                     sorted
                 }
             }
@@ -100,7 +105,7 @@ class GeminiProvider(
         val discovered = fetchAvailableModels(apiKey).getOrElse { emptyList() }
         if (discovered.isEmpty()) {
             // Instant resilient fallback so discovery lag/errors never stall replies
-            return listOf("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash")
+            return listOf("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-2.0-flash-lite")
         }
         return discovered
             .sortedByDescending { scoreGeminiModel(it.id, complexity, preferFastOnSimple) }
@@ -108,14 +113,14 @@ class GeminiProvider(
             .distinct()
     }
 
-    private fun scoreGeminiModel(id: String, complexity: TaskComplexity, preferFast: Boolean): Int {
+    internal fun scoreGeminiModel(id: String, complexity: TaskComplexity, preferFast: Boolean): Int {
         val lower = id.lowercase()
         var score = 0
-        val verMatch = Regex("""(\d+)\.(\d+)""").find(lower)
+        val verMatch = Regex("""(\d+)(?:\.(\d+))?""").find(lower)
         if (verMatch != null) {
             val major = verMatch.groupValues[1].toIntOrNull() ?: 1
             val minor = verMatch.groupValues[2].toIntOrNull() ?: 0
-            score += (major * 200 + minor * 20)
+            score += (major * 120 + minor * 15)
         }
         val isLite = lower.contains("lite")
         val isFlash = lower.contains("flash")
@@ -123,27 +128,32 @@ class GeminiProvider(
         val isLatestAlias = lower.endsWith("-latest")
         val isExperimental = lower.contains("exp") || lower.contains("preview")
 
-        // Strongly prioritize stable low-latency Flash models so replies never take 2-3 minutes
+        // Strongly prioritize stable GA free-tier Flash models (high RPM/RPD, fast, reliable tool-calling)
         score += when (complexity) {
             TaskComplexity.REASONING -> when {
-                !preferFast && isPro && !isExperimental -> 850
-                isFlash && !isLite && !isExperimental -> 820
+                lower == "gemini-2.5-flash" -> if (preferFast) 2200 else 1550
+                lower == "gemini-2.5-flash-lite" -> if (preferFast) 1850 else 1100
+                lower == "gemini-2.0-flash" -> 1650
+                !preferFast && isPro && !isExperimental -> 1750
+                isFlash && !isLite && !isExperimental -> 1300
                 isFlash && !isLite -> 700
                 isPro -> 500
                 else -> 250
             }
             TaskComplexity.SIMPLE, TaskComplexity.CODING, TaskComplexity.MULTISTEP_AGENT -> when {
-                lower == "gemini-2.5-flash" -> 1400
-                lower == "gemini-2.5-flash-lite" && complexity == TaskComplexity.SIMPLE -> 1450
-                isFlash && !isLite && !isExperimental -> 1150
-                isFlash && isLite && !isExperimental -> 980
-                isFlash && !isLite -> 750
+                lower == "gemini-2.5-flash" -> 2200
+                lower == "gemini-2.5-flash-lite" -> if (complexity == TaskComplexity.SIMPLE) 2250 else 1900
+                lower == "gemini-2.0-flash" -> 1750
+                lower == "gemini-2.0-flash-lite" -> 1550
+                isFlash && !isLite && !isExperimental -> 1350
+                isFlash && isLite && !isExperimental -> 1150
+                isFlash && !isLite -> 700
                 isPro && !isExperimental -> 480
                 else -> 240
             }
         }
         if (isLatestAlias) score -= 40
-        if (!isExperimental) score += 350 else score -= 250
+        if (!isExperimental) score += 450 else score -= 500
         if (lower.contains("deprecated")) score -= 3000
         return score
     }
@@ -162,7 +172,7 @@ class GeminiProvider(
         if (cleanKey.isBlank()) {
             return@withContext Result.failure(IllegalArgumentException("Gemini API key is empty or invalid."))
         }
-        val bodyJson = buildRequestBody(model, systemPrompt, messages, tools, fastMode)
+        var includeThinkingConfig = true
         val endpoint = if (stream && tools.isEmpty()) {
             "https://generativelanguage.googleapis.com/v1beta/models/$model:streamGenerateContent?alt=sse"
         } else {
@@ -172,6 +182,7 @@ class GeminiProvider(
         var lastError: Exception? = null
         repeat(2) { attempt ->
             try {
+                val bodyJson = buildRequestBody(model, systemPrompt, messages, tools, fastMode, includeThinkingConfig)
                 val request = Request.Builder()
                     .url(endpoint)
                     .addHeader("x-goog-api-key", cleanKey)
@@ -181,7 +192,18 @@ class GeminiProvider(
 
                 client.newCall(request).execute().use { response ->
                     val code = response.code
-                    // Fast failover on 429/400/401/403/404 so AiModelRouter rotates immediately to next API key
+                    if (code == 400 && attempt == 0 && includeThinkingConfig) {
+                        val errBody = response.body?.string().orEmpty()
+                        val errMsg = extractError(errBody)
+                        if (errMsg.contains("thinking", ignoreCase = true) || errMsg.contains("budget", ignoreCase = true)) {
+                            includeThinkingConfig = false
+                            lastError = IllegalStateException("Gemini API error ($code): $errMsg")
+                            return@use
+                        }
+                        auditLogger.log("generativelanguage.googleapis.com", "Gemini ($model)", "HTTP $code")
+                        return@withContext Result.failure(IllegalStateException("Gemini API error ($code): $errMsg"))
+                    }
+                    // Fast failover on 429/400/401/403/404 so AiModelRouter rotates immediately to next API key/model
                     if (code == 429 || (code in 400..499)) {
                         val errBody = response.body?.string().orEmpty()
                         auditLogger.log("generativelanguage.googleapis.com", "Gemini ($model)", "HTTP $code")
@@ -219,12 +241,13 @@ class GeminiProvider(
         Result.failure(lastError ?: IllegalStateException("Unknown Gemini network failure"))
     }
 
-    private fun buildRequestBody(
+    internal fun buildRequestBody(
         model: String,
         systemPrompt: String,
         messages: List<AiMessage>,
         tools: List<ToolDeclaration>,
-        fastMode: Boolean
+        fastMode: Boolean,
+        includeThinkingConfig: Boolean = true
     ): JSONObject {
         val contents = JSONArray()
         var idx = 0
@@ -304,11 +327,13 @@ class GeminiProvider(
         }
         val lowerModel = model.lowercase()
         val genConfig = JSONObject()
-        if (lowerModel.contains("2.5-flash")) {
-            // 0 thinking budget on quick greetings/fast mode; lean 512 on tool turns so responses arrive in ~2-5s
-            genConfig.put("thinkingConfig", JSONObject().put("thinkingBudget", if (fastMode) 0 else 512))
-        } else if (lowerModel.contains("gemini-3") && lowerModel.contains("flash")) {
-            genConfig.put("thinkingConfig", JSONObject().put("thinkingLevel", if (fastMode) "minimal" else "low"))
+        if (includeThinkingConfig) {
+            if (lowerModel.contains("2.5-flash")) {
+                // 0 thinking budget on quick greetings/fast mode; lean 512 on tool turns so responses arrive in ~2-5s
+                genConfig.put("thinkingConfig", JSONObject().put("thinkingBudget", if (fastMode) 0 else 512))
+            } else if (lowerModel.contains("gemini-3") && lowerModel.contains("flash")) {
+                genConfig.put("thinkingConfig", JSONObject().put("thinkingLevel", if (fastMode) "minimal" else "low"))
+            }
         }
         if (genConfig.length() > 0) {
             root.put("generationConfig", genConfig)
@@ -331,7 +356,7 @@ class GeminiProvider(
         return root
     }
 
-    private fun parseSingleResponse(raw: String, model: String): AiCompletionResult {
+    internal fun parseSingleResponse(raw: String, model: String): AiCompletionResult {
         val root = JSONObject(raw)
         val candidates = root.optJSONArray("candidates")
         val first = candidates?.optJSONObject(0)
@@ -366,11 +391,18 @@ class GeminiProvider(
         val usage = root.optJSONObject("usageMetadata")
         val promptTokens = usage?.optInt("promptTokenCount", 0) ?: 0
         val completionTokens = usage?.optInt("candidatesTokenCount", 0) ?: 0
+        val finalText = textSb.toString().trim()
+        val finishReason = first?.optString("finishReason").orEmpty()
+        if (finalText.isBlank() && toolCalls.isEmpty()) {
+            throw IllegalStateException(
+                "Gemini ($model) returned empty response${if (finishReason.isNotBlank()) " ($finishReason)" else ""}"
+            )
+        }
 
         return AiCompletionResult(
             provider = "Gemini",
             model = model,
-            text = textSb.toString().trim(),
+            text = finalText,
             toolCalls = toolCalls,
             promptTokens = promptTokens,
             completionTokens = completionTokens,
@@ -386,6 +418,8 @@ class GeminiProvider(
         val textSb = StringBuilder()
         var promptTokens = 0
         var completionTokens = 0
+        var finishReason = ""
+        var streamError: String? = null
         val reader = BufferedReader(InputStreamReader(response.body!!.byteStream()))
         reader.useLines { lines ->
             lines.forEach { line ->
@@ -394,10 +428,14 @@ class GeminiProvider(
                     if (payload.isNotEmpty() && payload != "[DONE]") {
                         runCatching {
                             val obj = JSONObject(payload)
-                            val partsArr = obj.optJSONArray("candidates")
-                                ?.optJSONObject(0)
-                                ?.optJSONObject("content")
-                                ?.optJSONArray("parts")
+                            val errObj = obj.optJSONObject("error")
+                            if (errObj != null) {
+                                streamError = errObj.optString("message", "Stream error")
+                            }
+                            val firstCand = obj.optJSONArray("candidates")?.optJSONObject(0)
+                            val fr = firstCand?.optString("finishReason").orEmpty()
+                            if (fr.isNotBlank()) finishReason = fr
+                            val partsArr = firstCand?.optJSONObject("content")?.optJSONArray("parts")
                             if (partsArr != null) {
                                 for (i in 0 until partsArr.length()) {
                                     val p = partsArr.optJSONObject(i) ?: continue
@@ -419,12 +457,20 @@ class GeminiProvider(
                 }
             }
         }
-        val finalText = textSb.toString()
+        if (!streamError.isNullOrBlank() && textSb.isEmpty()) {
+            throw IllegalStateException("Gemini stream error ($model): $streamError")
+        }
+        val finalText = textSb.toString().trim()
+        if (finalText.isBlank()) {
+            throw IllegalStateException(
+                "Gemini stream ($model) returned empty output${if (finishReason.isNotBlank()) " ($finishReason)" else ""}"
+            )
+        }
         auditLogger.log("generativelanguage.googleapis.com", "Gemini Stream ($model)", "200 OK", finalText.length.toLong())
         return AiCompletionResult(
             provider = "Gemini",
             model = model,
-            text = finalText.trim(),
+            text = finalText,
             promptTokens = promptTokens,
             completionTokens = completionTokens
         )

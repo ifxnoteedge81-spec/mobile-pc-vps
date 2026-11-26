@@ -20,14 +20,14 @@ class OpenRouterProvider(
     private val auditLogger: NetworkAuditLogger
 ) {
     private val client = OkHttpClient.Builder()
-        .connectTimeout(8, TimeUnit.SECONDS)
-        .readTimeout(28, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(35, TimeUnit.SECONDS)
         .writeTimeout(15, TimeUnit.SECONDS)
         .build()
 
     private val discoveryClient = OkHttpClient.Builder()
-        .connectTimeout(6, TimeUnit.SECONDS)
-        .readTimeout(7, TimeUnit.SECONDS)
+        .connectTimeout(7, TimeUnit.SECONDS)
+        .readTimeout(8, TimeUnit.SECONDS)
         .build()
 
     @Volatile
@@ -35,7 +35,21 @@ class OpenRouterProvider(
     @Volatile
     private var cachedModels: List<OpenRouterModelInfo> = emptyList()
     private val freeTierCache = ConcurrentHashMap<Int, Pair<Boolean, Long>>()
-    private val badToolModels = ConcurrentHashMap<String, Long>()
+    private val modelCooldowns = ConcurrentHashMap<String, Long>()
+
+    fun clearCache() {
+        cachedModelsFetchedAt = 0L
+        cachedModels = emptyList()
+        freeTierCache.clear()
+        modelCooldowns.clear()
+    }
+
+    fun markFreeTierOnly(apiKey: String) {
+        val cleanKey = SecureKeyStore.sanitizeSecret(apiKey)
+        if (cleanKey.isNotBlank()) {
+            freeTierCache[cleanKey.hashCode()] = true to System.currentTimeMillis()
+        }
+    }
 
     suspend fun isKeyFreeTierOnly(apiKey: String): Boolean = withContext(Dispatchers.IO) {
         val cleanKey = SecureKeyStore.sanitizeSecret(apiKey)
@@ -55,8 +69,8 @@ class OpenRouterProvider(
                 if (!resp.isSuccessful) return@use true
                 val data = JSONObject(resp.body?.string().orEmpty()).optJSONObject("data") ?: return@use true
                 val isFreeTier = data.optBoolean("is_free_tier", true)
-                val limitRemaining = data.optDouble("limit_remaining", -1.0)
-                isFreeTier && limitRemaining <= 0.0
+                val hasZeroRemaining = !data.isNull("limit_remaining") && data.optDouble("limit_remaining", 1.0) <= 0.0
+                isFreeTier || hasZeroRemaining
             }
         }.getOrDefault(false)
         freeTierCache[keyHash] = result to System.currentTimeMillis()
@@ -112,8 +126,8 @@ class OpenRouterProvider(
             }
         }
 
-    fun markToolFailure(modelId: String) {
-        badToolModels[modelId] = System.currentTimeMillis()
+    fun markModelFailure(modelId: String, cooldownMs: Long = 8 * 60_000L) {
+        modelCooldowns[modelId] = System.currentTimeMillis() + cooldownMs
     }
 
     suspend fun resolveCandidateModels(
@@ -121,40 +135,77 @@ class OpenRouterProvider(
         requestedModel: String,
         complexity: TaskComplexity,
         requiresTools: Boolean,
-        preferFreeOnSimple: Boolean
+        preferFreeOnSimple: Boolean,
+        forceFreeOnly: Boolean = false
     ): List<String> {
         if (requestedModel.isNotBlank() && requestedModel != AUTO_MODEL_ID) {
             return listOf(requestedModel)
         }
-        val freeOnly = isKeyFreeTierOnly(apiKey)
+        val freeOnly = forceFreeOnly || isKeyFreeTierOnly(apiKey)
         val models = fetchAvailableModels(apiKey).getOrElse { emptyList() }
         if (models.isEmpty()) {
-            return listOf("openrouter/auto")
+            return if (freeOnly) {
+                listOf(
+                    "openrouter/free",
+                    "meta-llama/llama-3.3-70b-instruct:free",
+                    "qwen/qwen-2.5-72b-instruct:free",
+                    "google/gemma-3-27b-it:free",
+                    "mistralai/mistral-small-3.1-24b-instruct:free"
+                )
+            } else {
+                listOf("openrouter/auto", "openrouter/free")
+            }
         }
 
+        return filterAndRankModels(
+            models = models,
+            freeOnly = freeOnly,
+            complexity = complexity,
+            requiresTools = requiresTools,
+            preferFreeOnSimple = preferFreeOnSimple
+        )
+    }
+
+    internal fun filterAndRankModels(
+        models: List<OpenRouterModelInfo>,
+        freeOnly: Boolean,
+        complexity: TaskComplexity,
+        requiresTools: Boolean,
+        preferFreeOnSimple: Boolean
+    ): List<String> {
         val now = System.currentTimeMillis()
         val healthy = models.filter { m ->
-            val badAt = badToolModels[m.id]
-            badAt == null || (now - badAt) > 10 * 60_000L
+            val lower = m.id.lowercase()
+            val excluded = lower.contains("embed") || lower.contains("guard") || lower.contains("moderation")
+            val cooledUntil = modelCooldowns[m.id] ?: 0L
+            !excluded && now >= cooledUntil
         }.ifEmpty { models }
 
-        val toolFiltered = if (requiresTools) healthy.filter { it.supportsTools }.ifEmpty { healthy } else healthy
-        val tierFiltered = if (freeOnly || (preferFreeOnSimple && complexity == TaskComplexity.SIMPLE)) {
-            toolFiltered.filter { it.isFree }.ifEmpty { toolFiltered }
+        // CRITICAL: When key is free-tier only, filter isFree FIRST so paid models (HTTP 402) are NEVER picked!
+        val tierPool = if (freeOnly) {
+            healthy.filter { it.isFree }.ifEmpty { models.filter { it.isFree } }
+        } else if (preferFreeOnSimple && complexity == TaskComplexity.SIMPLE) {
+            healthy.filter { it.isFree }.ifEmpty { healthy }
         } else {
-            toolFiltered
+            healthy
         }
 
-        val ranked = tierFiltered
+        val toolFiltered = if (requiresTools) {
+            tierPool.filter { it.supportsTools }.ifEmpty { tierPool }
+        } else {
+            tierPool
+        }
+
+        val ranked = toolFiltered
             .sortedByDescending { m ->
                 var score = (m.contextLength / 2048).coerceAtMost(250)
-                if (m.supportsTools) score += 600
-                if (freeOnly && m.isFree) score += 1000
+                if (m.supportsTools) score += if (requiresTools) 1500 else 700
+                if (freeOnly && m.isFree) score += 1200
                 if (!freeOnly && m.id == "openrouter/auto") score += 2500
-                // Prefer known fast & reliable OpenAI/Gemini/Qwen/Llama tool-calling families
+                if (freeOnly && m.id == "openrouter/free") score += if (requiresTools) 950 else 1600
                 val lower = m.id.lowercase()
                 if (lower.contains("gemini") || lower.contains("gpt-4o") || lower.contains("gpt-4.1")) score += 450
-                if (lower.contains("qwen") || lower.contains("llama-3.3") || lower.contains("mistral")) score += 320
+                if (lower.contains("qwen") || lower.contains("llama-3.3") || lower.contains("mistral") || lower.contains("gemma-3")) score += 340
                 if (complexity == TaskComplexity.CODING && (lower.contains("coder") || lower.contains("deepseek") || lower.contains("claude"))) score += 350
                 if (lower.contains("thinking") || lower.contains(":thinking")) score -= 400
                 score
@@ -162,10 +213,13 @@ class OpenRouterProvider(
             .map { it.id }
             .toMutableList()
 
-        if (!freeOnly && !ranked.contains("openrouter/auto")) {
+        if (freeOnly && !ranked.contains("openrouter/free")) {
+            val insertIdx = if (requiresTools) minOf(3, ranked.size) else 0
+            ranked.add(insertIdx, "openrouter/free")
+        } else if (!freeOnly && !ranked.contains("openrouter/auto")) {
             ranked.add(0, "openrouter/auto")
         }
-        return ranked.distinct().take(5)
+        return ranked.distinct().take(8)
     }
 
     suspend fun generate(
@@ -200,8 +254,13 @@ class OpenRouterProvider(
                     if (code == 429 || (code in 400..499)) {
                         val errText = response.body?.string().orEmpty()
                         val msg = extractError(errText)
-                        if (code == 400 || code == 404 || code == 422 || msg.contains("tool", ignoreCase = true)) {
-                            markToolFailure(model)
+                        if (code == 402 || msg.contains("credits", ignoreCase = true) || msg.contains("payment", ignoreCase = true)) {
+                            markFreeTierOnly(cleanKey)
+                            markModelFailure(model, 30 * 60_000L)
+                        } else if (code == 429) {
+                            markModelFailure(model, 90_000L)
+                        } else if (code == 400 || code == 404 || code == 422 || msg.contains("tool", ignoreCase = true)) {
+                            markModelFailure(model, 10 * 60_000L)
                         }
                         auditLogger.log("openrouter.ai", "OpenRouter ($model)", "HTTP $code")
                         return@withContext Result.failure(
@@ -238,7 +297,7 @@ class OpenRouterProvider(
         Result.failure(lastErr ?: IllegalStateException("Unknown OpenRouter failure"))
     }
 
-    private fun buildRequestBody(
+    internal fun buildRequestBody(
         model: String,
         systemPrompt: String,
         messages: List<AiMessage>,
@@ -275,13 +334,8 @@ class OpenRouterProvider(
                 }
                 "assistant" -> {
                     val obj = JSONObject().put("role", "assistant")
-                    if (msg.content.isNotBlank()) {
-                        obj.put("content", msg.content)
-                    } else if (msg.toolCalls.isEmpty()) {
-                        obj.put("content", "")
-                    } else {
-                        obj.put("content", JSONObject.NULL)
-                    }
+                    // Always send string content (empty string when tool-only) so strict free providers never reject null
+                    obj.put("content", msg.content)
                     if (msg.toolCalls.isNotEmpty()) {
                         val callsArr = JSONArray()
                         msg.toolCalls.forEach { call ->
@@ -352,7 +406,7 @@ class OpenRouterProvider(
         return root
     }
 
-    private fun parseSingleResponse(raw: String, model: String): AiCompletionResult {
+    internal fun parseSingleResponse(raw: String, model: String): AiCompletionResult {
         val root = JSONObject(raw)
         if (root.has("error") && !root.isNull("error")) {
             val errObj = root.optJSONObject("error")
@@ -387,10 +441,15 @@ class OpenRouterProvider(
         }
 
         val usage = root.optJSONObject("usage")
+        val trimmedContent = content.trim()
+        if (trimmedContent.isBlank() && toolCalls.isEmpty()) {
+            markModelFailure(model, 90_000L)
+            throw IllegalStateException("OpenRouter ($model) returned empty response.")
+        }
         return AiCompletionResult(
             provider = "OpenRouter",
             model = optNullableString(root, "model").ifBlank { model },
-            text = content.trim(),
+            text = trimmedContent,
             toolCalls = toolCalls,
             promptTokens = usage?.optInt("prompt_tokens", 0) ?: 0,
             completionTokens = usage?.optInt("completion_tokens", 0) ?: 0
@@ -426,6 +485,7 @@ class OpenRouterProvider(
         onStreamChunk: (String) -> Unit
     ): AiCompletionResult {
         val textSb = StringBuilder()
+        var streamError: String? = null
         val reader = BufferedReader(InputStreamReader(response.body!!.byteStream()))
         reader.useLines { lines ->
             lines.forEach { line ->
@@ -434,6 +494,10 @@ class OpenRouterProvider(
                     if (payload.isNotEmpty() && payload != "[DONE]") {
                         runCatching {
                             val obj = JSONObject(payload)
+                            val errObj = obj.optJSONObject("error")
+                            if (errObj != null) {
+                                streamError = errObj.optString("message", "Stream error")
+                            }
                             val deltaObj = obj.optJSONArray("choices")
                                 ?.optJSONObject(0)
                                 ?.optJSONObject("delta")
@@ -447,12 +511,20 @@ class OpenRouterProvider(
                 }
             }
         }
-        val finalText = textSb.toString()
+        if (!streamError.isNullOrBlank() && textSb.isEmpty()) {
+            markModelFailure(model, 90_000L)
+            throw IllegalStateException("OpenRouter stream error ($model): $streamError")
+        }
+        val finalText = textSb.toString().trim()
+        if (finalText.isBlank()) {
+            markModelFailure(model, 90_000L)
+            throw IllegalStateException("OpenRouter stream ($model) returned empty output.")
+        }
         auditLogger.log("openrouter.ai", "OpenRouter Stream ($model)", "200 OK", finalText.length.toLong())
         return AiCompletionResult(
             provider = "OpenRouter",
             model = model,
-            text = finalText.trim()
+            text = finalText
         )
     }
 

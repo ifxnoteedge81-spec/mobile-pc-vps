@@ -768,9 +768,18 @@ private class PyLiteInterpreter(
                             "upper" -> recv.uppercase()
                             "lower" -> recv.lowercase()
                             "strip" -> recv.trim()
+                            "lstrip" -> recv.trimStart()
+                            "rstrip" -> recv.trimEnd()
                             "startswith" -> recv.startsWith(positional[0].toString())
                             "endswith" -> recv.endsWith(positional[0].toString())
                             "split" -> if (positional.isEmpty()) recv.trim().split(Regex("\\s+")).toMutableList() else recv.split(positional[0].toString()).toMutableList()
+                            "splitlines" -> recv.replace("\r\n", "\n").split("\n").toMutableList()
+                            "find" -> recv.indexOf(positional[0].toString()).toLong()
+                            "count" -> {
+                                val sub = positional[0].toString()
+                                if (sub.isEmpty()) 0L else Regex.escape(sub).toRegex().findAll(recv).count().toLong()
+                            }
+                            "isdigit" -> recv.isNotEmpty() && recv.all { it.isDigit() }
                             "join" -> (positional.firstOrNull() as? List<*>)?.joinToString(recv) { pyStr(it) } ?: ""
                             "replace" -> recv.replace(positional[0].toString(), positional[1].toString())
                             else -> null
@@ -1000,6 +1009,7 @@ private class PyLiteInterpreter(
 
     private fun toIterable(v: Any?): List<Any?> = when (v) {
         is List<*> -> v
+        is PyFileHandle -> v.read().replace("\r\n", "\n").split("\n")
         is String -> v.map { it.toString() }
         is Map<*, *> -> v.keys.toList()
         else -> emptyList()

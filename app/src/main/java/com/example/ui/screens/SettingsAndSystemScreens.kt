@@ -807,7 +807,14 @@ fun PermissionsAndSecurityScreen(
 }
 
 @Composable
-fun AboutApplicationScreen() {
+fun AboutApplicationScreen(
+    installedIdentity: com.example.runtime.InstalledAppIdentity? = null,
+    availableUpdate: com.example.runtime.AppUpdateInfo? = null,
+    isCheckingUpdate: Boolean = false,
+    onCheckForUpdate: () -> Unit = {},
+    onDownloadInPlaceUpdate: (String) -> Unit = {}
+) {
+    val versionLabel = installedIdentity?.versionName ?: "1.0"
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -817,10 +824,69 @@ fun AboutApplicationScreen() {
     ) {
         item {
             SectionHeader(
-                title = "Personal AI Computer v1.0.0",
-                subtitle = "Local-First Autonomous Mobile Agent Operating Environment",
+                title = "Personal AI Computer v$versionLabel",
+                subtitle = "Local-First Autonomous Mobile Agent • In-Place Update Enabled",
                 icon = Icons.Filled.Info
             )
+        }
+        item {
+            GlassOsCard(borderColor = if (availableUpdate?.isUpdateAvailable == true) EmeraldPulse else NeuralCyan.copy(alpha = 0.45f)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Seamless In-Place Updates", style = MaterialTheme.typography.titleSmall)
+                    StatusBadge(
+                        label = if (availableUpdate?.isUpdateAvailable == true) "Update Ready" else "Up-to-date Safe",
+                        color = EmeraldPulse
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "নতুন ভার্সন ইনস্টল করলে আগের অ্যাপটি আনইনস্টল করার কোনো প্রয়োজন নেই — আপনার সব API Key, মেমরি, স্কিল ও ফাইল সম্পূর্ণ অক্ষত রেখেই স্বয়ংক্রিয়ভাবে ইন-প্লেস আপডেট হবে।",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (installedIdentity != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Package: ${installedIdentity.applicationId}\n" +
+                            "Version: ${installedIdentity.versionName} (Code ${installedIdentity.versionCode})\n" +
+                            "Signing Key SHA-256: ${installedIdentity.signingSha256.take(29)}...",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = onCheckForUpdate,
+                        enabled = !isCheckingUpdate,
+                        modifier = Modifier.testTag("check_app_update_button")
+                    ) {
+                        Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(if (isCheckingUpdate) "Checking..." else "Check for Updates")
+                    }
+                    if (availableUpdate?.isUpdateAvailable == true) {
+                        Button(
+                            onClick = { onDownloadInPlaceUpdate(availableUpdate.downloadUrl) },
+                            modifier = Modifier.testTag("install_in_place_update_button")
+                        ) {
+                            Text("Update (${availableUpdate.latestVersion})")
+                        }
+                    }
+                }
+                if (availableUpdate?.isUpdateAvailable == true && availableUpdate.changelog.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        availableUpdate.changelog.joinToString("\n") { "• $it" },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = EmeraldPulse
+                    )
+                }
+            }
         }
         item {
             GlassOsCard {

@@ -284,6 +284,31 @@ class BrowserController(
         snap
     }
 
+    suspend fun dismissCommonOverlays(): String? = withContext(Dispatchers.Main) {
+        val wv = webViewRef?.get() ?: return@withContext null
+        val js = """
+            (function() {
+                const allowLabels = ['accept all', 'accept cookies', 'i agree', 'got it', 'not now', 'maybe later', 'no thanks', 'skip', 'skip ad', 'dismiss', 'close'];
+                const blockWords = ['buy', 'pay', 'purchase', 'checkout', 'subscribe', 'delete', 'remove', 'install', 'download'];
+                const btns = Array.from(document.querySelectorAll('button, [role=button], a.close, .close-btn, .modal-close'));
+                for (const b of btns) {
+                    const rect = b.getBoundingClientRect();
+                    if (!rect || rect.width <= 0 || rect.height <= 0) continue;
+                    const txt = (b.innerText || b.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim().toLowerCase();
+                    if (!txt || txt.length > 28) continue;
+                    if (blockWords.some(w => txt.includes(w))) continue;
+                    if (allowLabels.some(l => txt === l || txt.startsWith(l + ' '))) {
+                        b.click();
+                        return txt;
+                    }
+                }
+                return '';
+            })();
+        """.trimIndent()
+        val res = evalJs(wv, js)?.trim()?.trim('"') ?: ""
+        res.takeIf { it.isNotBlank() && it != "null" }
+    }
+
     suspend fun scrollPage(direction: String): Result<String> = withContext(Dispatchers.Main) {
         val wv = ensureWebViewReady()
             ?: return@withContext Result.failure(IllegalStateException("Browser WebView not attached"))

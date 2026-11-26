@@ -6,8 +6,8 @@ async function loadReleaseMetadata() {
     if (!resp.ok) throw new Error("Missing version.json");
     let data = await resp.json();
 
-    // If version.json is still pending-ci-build but repo slug is known, query GitHub Releases live
-    if ((!data.sizeBytes || data.sizeBytes === 0) && data.repo) {
+    // Query GitHub Releases live if size/URL missing or to refresh release link
+    if ((!data.sizeBytes || data.sizeBytes === 0 || !data.releaseDownloadUrl) && data.repo) {
       try {
         let release = null;
         const ghResp = await fetch(`https://api.github.com/repos/${data.repo}/releases/latest`);
@@ -24,14 +24,19 @@ async function loadReleaseMetadata() {
         if (apkAsset) {
           data = {
             ...data,
-            version: release.tag_name || "latest",
-            buildType: "github-release",
-            releaseDate: apkAsset.updated_at || release.published_at,
+            version: data.version && data.version !== "pending-ci-build" ? data.version : (release.tag_name || "latest"),
+            buildType: data.buildType && data.buildType !== "unbuilt-template" ? data.buildType : "github-release",
+            releaseDate: apkAsset.updated_at || release.published_at || data.releaseDate,
             releaseDownloadUrl: apkAsset.browser_download_url,
-            sizeBytes: apkAsset.size
+            sizeBytes: apkAsset.size || data.sizeBytes
           };
         }
       } catch (_) {}
+    }
+
+    const releasesLinkEl = document.getElementById("releases-page-link");
+    if (releasesLinkEl && data.repo) {
+      releasesLinkEl.href = `https://github.com/${data.repo}/releases/latest`;
     }
 
     document.getElementById("version").textContent = data.version || "Pending CI";
@@ -43,23 +48,22 @@ async function loadReleaseMetadata() {
       const mb = (data.sizeBytes / (1024 * 1024)).toFixed(2);
       document.getElementById("apk-size").textContent = `${mb} MB`;
 
+      // Always prefer GitHub Releases direct APK URL first (zero Netlify bandwidth usage)
       let resolvedDownloadUrl = null;
-      if (data.apkFile) {
+      if (data.releaseDownloadUrl && data.releaseDownloadUrl.startsWith("https://")) {
+        resolvedDownloadUrl = data.releaseDownloadUrl;
+      } else if (data.apkFile) {
         try {
           const head = await fetch(data.apkFile, { method: "HEAD" });
           if (head.ok) resolvedDownloadUrl = data.apkFile;
         } catch (_) {}
       }
 
-      if (!resolvedDownloadUrl && data.releaseDownloadUrl && data.releaseDownloadUrl.startsWith("https://")) {
-        resolvedDownloadUrl = data.releaseDownloadUrl;
-      }
-
       if (resolvedDownloadUrl) {
         btn.href = resolvedDownloadUrl;
         btn.classList.remove("disabled");
         btn.removeAttribute("aria-disabled");
-        statusEl.textContent = data.buildType || "Ready";
+        statusEl.textContent = `${data.buildType || "Ready"} • GitHub Release`;
       } else {
         statusEl.textContent = "APK binary not yet published";
       }

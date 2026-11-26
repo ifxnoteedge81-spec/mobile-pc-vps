@@ -129,9 +129,54 @@ interface ImportedSkillDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertSkill(skill: ImportedSkillEntity)
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertSkills(skills: List<ImportedSkillEntity>)
+
     @Query("DELETE FROM imported_skills WHERE slug = :slug")
     suspend fun deleteSkill(slug: String)
 
     @Query("DELETE FROM imported_skills")
     suspend fun clearAllSkills()
+}
+
+@Dao
+interface WhatsAppChatDao {
+    @Query("SELECT * FROM whatsapp_chats ORDER BY lastMessageAt DESC")
+    fun observeAllChats(): Flow<List<WhatsAppChatEntity>>
+
+    @Query("SELECT * FROM whatsapp_chats ORDER BY lastMessageAt DESC")
+    suspend fun getAllChatsSnapshot(): List<WhatsAppChatEntity>
+
+    @Query("SELECT * FROM whatsapp_chats WHERE chatKey = :chatKey LIMIT 1")
+    suspend fun getChatByKey(chatKey: String): WhatsAppChatEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertChat(chat: WhatsAppChatEntity)
+
+    @Query("DELETE FROM whatsapp_chats WHERE chatKey = :chatKey")
+    suspend fun deleteChat(chatKey: String)
+
+    @Query("DELETE FROM whatsapp_chats")
+    suspend fun clearAllChats()
+}
+
+@Dao
+interface WhatsAppMessageDao {
+    @Query("SELECT * FROM whatsapp_messages WHERE chatKey = :chatKey ORDER BY timestamp DESC LIMIT :limit")
+    suspend fun getRecentMessagesForChat(chatKey: String, limit: Int = 20): List<WhatsAppMessageEntity>
+
+    @Query("SELECT * FROM whatsapp_messages WHERE chatKey = :chatKey ORDER BY timestamp ASC LIMIT 80")
+    fun observeMessagesForChat(chatKey: String): Flow<List<WhatsAppMessageEntity>>
+
+    @Query("SELECT * FROM whatsapp_messages ORDER BY timestamp DESC LIMIT 100")
+    fun observeRecentActivity(): Flow<List<WhatsAppMessageEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertMessage(message: WhatsAppMessageEntity): Long
+
+    @Query("DELETE FROM whatsapp_messages WHERE chatKey = :chatKey")
+    suspend fun deleteMessagesForChat(chatKey: String)
+
+    @Query("DELETE FROM whatsapp_messages")
+    suspend fun clearAllMessages()
 }
