@@ -1,17 +1,18 @@
 {
   "appName": "Personal AI Computer",
-  "version": "main-7",
+  "version": "main-8",
+  "versionCode": 9571587,
   "buildType": "debug-build",
-  "releaseDate": "2026-11-25T12:55:22Z",
+  "releaseDate": "2026-11-26T17:57:17Z",
   "apkFile": "downloads/personal-ai-computer.apk",
   "releaseDownloadUrl": "https://github.com/ifxnoteedge81-spec/mobile-pc-vps/releases/download/latest/personal-ai-computer.apk",
   "repo": "ifxnoteedge81-spec/mobile-pc-vps",
-  "sizeBytes": 21844887,
-  "sha256": "b1f62c2c12c3bea203f10f15444bc2ce1f7e384529567d429362a7f12f60fd97",
+  "sizeBytes": 22189562,
+  "sha256": "638038ba8c102d77c83dedff0df0bdb45e966fb1cb67cdecac439bcb7bebb349",
   "minAndroid": "Android 7.0 (API 24)",
   "changelog": [
-    "Autonomous OpenClaw-inspired Agent Engine (Bangla & English)",
-    "Local Virtual Linux Environment (sh, PyLite Python 3, V8 JS, HTTP server)",
-    "Multi-tab Chromium WebView DOM Automation & Accessibility Virtual Hands"
+    "Seamless In-Place Updates (No Uninstall Required) & Data Migration Guard",
+    "Zero-Second Multi-Bot Fast Engine, Auto-Popup Reflex & Multi-Media Targeting",
+    "100% Free-Tier Gemini 5-Key Pool + OpenRouter Auto-Recovery & GitHub Releases Distribution"
   ]
 }
