@@ -14,6 +14,7 @@ class AgentRepository(private val db: AppDatabase) : UniversalSkillManager.Skill
     private val skillDao = db.importedSkillDao()
     private val waChatDao = db.whatsAppChatDao()
     private val waMessageDao = db.whatsAppMessageDao()
+    private val waScheduleDao = db.whatsAppScheduleDao()
 
     val tasks: Flow<List<AgentTaskEntity>> = taskDao.observeAllTasks()
     val recentLogs: Flow<List<ExecutionLogEntity>> = logDao.observeRecentLogs()
@@ -24,6 +25,7 @@ class AgentRepository(private val db: AppDatabase) : UniversalSkillManager.Skill
     val importedSkills: Flow<List<ImportedSkillEntity>> = skillDao.observeAllSkills()
     val whatsAppChats: Flow<List<WhatsAppChatEntity>> = waChatDao.observeAllChats()
     val whatsAppActivity: Flow<List<WhatsAppMessageEntity>> = waMessageDao.observeRecentActivity()
+    val whatsAppSchedules: Flow<List<WhatsAppScheduledMessageEntity>> = waScheduleDao.observeAllSchedules()
 
     fun observeTask(taskId: Long): Flow<AgentTaskEntity?> = taskDao.observeTask(taskId)
     fun observeLogsForTask(taskId: Long): Flow<List<ExecutionLogEntity>> = logDao.observeLogsForTask(taskId)
@@ -139,6 +141,26 @@ class AgentRepository(private val db: AppDatabase) : UniversalSkillManager.Skill
 
     suspend fun insertWhatsAppMessage(msg: WhatsAppMessageEntity): Long = waMessageDao.insertMessage(msg)
 
+    suspend fun getWhatsAppScheduleById(id: Long): WhatsAppScheduledMessageEntity? =
+        waScheduleDao.getScheduleById(id)
+
+    suspend fun getDueWhatsAppSchedules(nowMillis: Long): List<WhatsAppScheduledMessageEntity> =
+        waScheduleDao.getDuePendingSchedules(nowMillis)
+
+    suspend fun getPendingWhatsAppSchedulesSnapshot(): List<WhatsAppScheduledMessageEntity> =
+        waScheduleDao.getPendingSchedulesSnapshot()
+
+    suspend fun insertWhatsAppSchedule(item: WhatsAppScheduledMessageEntity): Long =
+        waScheduleDao.insertSchedule(item)
+
+    suspend fun insertWhatsAppSchedules(items: List<WhatsAppScheduledMessageEntity>): List<Long> =
+        waScheduleDao.insertSchedules(items)
+
+    suspend fun updateWhatsAppSchedule(item: WhatsAppScheduledMessageEntity) =
+        waScheduleDao.updateSchedule(item)
+
+    suspend fun deleteWhatsAppSchedule(id: Long) = waScheduleDao.deleteSchedule(id)
+
     suspend fun clearAllUserData() {
         logDao.clearAllLogs()
         taskDao.clearAllTasks()
@@ -147,5 +169,6 @@ class AgentRepository(private val db: AppDatabase) : UniversalSkillManager.Skill
         skillDao.clearAllSkills()
         waMessageDao.clearAllMessages()
         waChatDao.clearAllChats()
+        waScheduleDao.clearAllSchedules()
     }
 }

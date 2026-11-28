@@ -6,7 +6,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 
 data class NetworkEvent(
-    val id: Long = System.nanoTime(),
+    val id: Long = com.example.runtime.MonotonicIdGenerator.nextId(),
     val timestamp: Long = System.currentTimeMillis(),
     val destination: String,
     val purpose: String,

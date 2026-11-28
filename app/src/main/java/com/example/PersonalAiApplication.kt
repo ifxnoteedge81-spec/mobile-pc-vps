@@ -23,12 +23,19 @@ import com.example.security.SecureKeyStore
 import com.example.storage.AgentRepository
 import com.example.storage.AppDatabase
 import com.example.storage.SettingsDataStore
+import com.example.voice.SpeakerVoiceprintManager
+import com.example.voice.VoiceAssistantController
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 class AppContainer(context: Context) {
-    val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val appExceptionHandler = CoroutineExceptionHandler { _, throwable ->
+        android.util.Log.e("PersonalAiApp", "Uncaught background coroutine error", throwable)
+    }
+    val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate + appExceptionHandler)
 
     val keyStore = SecureKeyStore(context)
     val auditLogger = NetworkAuditLogger()
@@ -61,6 +68,9 @@ class AppContainer(context: Context) {
     val aiRouter = AiModelRouter(context, keyStore, geminiProvider, openRouterProvider, repository)
     val updateChecker = com.example.runtime.AppUpdateChecker(context, auditLogger)
 
+    val miniAiBrain = com.example.ai.LocalMiniAiBrain(
+        java.io.File(context.filesDir, "mini_ai_brain.json")
+    )
     val whatsAppWebBridge = com.example.whatsapp.WhatsAppWebBridge(context, appScope, auditLogger)
     val whatsAppBotEngine = com.example.whatsapp.WhatsAppBotEngine(
         context = context,
@@ -68,7 +78,8 @@ class AppContainer(context: Context) {
         repository = repository,
         settingsStore = settingsStore,
         aiRouter = aiRouter,
-        webBridge = whatsAppWebBridge
+        webBridge = whatsAppWebBridge,
+        miniAiBrain = miniAiBrain
     )
 
     val toolRegistry = ToolRegistry(
@@ -84,7 +95,8 @@ class AppContainer(context: Context) {
         repository = repository,
         skillManager = universalSkillManager,
         botEngine = zeroLatencyBots,
-        whatsAppBotEngine = whatsAppBotEngine
+        whatsAppBotEngine = whatsAppBotEngine,
+        workScheduler = workScheduler
     )
 
     val agentEngine = AutonomousAgentEngine(
@@ -97,6 +109,7 @@ class AppContainer(context: Context) {
         skillManager = universalSkillManager,
         settingsFlow = settingsStore.settings,
         botEngine = zeroLatencyBots,
+        miniAiBrain = miniAiBrain,
         onInterventionAlert = { req ->
             com.example.scheduler.AgentForegroundService.postInterventionNotification(
                 context = context,
@@ -105,6 +118,35 @@ class AppContainer(context: Context) {
             )
         }
     )
+
+    val speakerVoiceprintManager = SpeakerVoiceprintManager(context)
+    val voiceAssistantController = VoiceAssistantController(
+        context = context,
+        scope = appScope,
+        settingsStore = settingsStore,
+        voiceprintManager = speakerVoiceprintManager,
+        onExecuteVoiceCommand = { spokenCmd ->
+            val (_, report) = agentEngine.executeCommandAndWaitWithReport(spokenCmd)
+            report
+        }
+    )
+
+    init {
+        // Connect WhatsApp Owner `.cmd` tool directly to the Autonomous AI Computer engine
+        whatsAppBotEngine.attachComputerTaskBridge { taskPrompt ->
+            val (_, report) = agentEngine.executeCommandAndWaitWithReport(taskPrompt)
+            report.take(900)
+        }
+
+        // Sweep overdue WhatsApp scheduled items & restore pending WorkManager triggers on startup
+        appScope.launch(Dispatchers.IO) {
+            runCatching {
+                val pending = repository.getPendingWhatsAppSchedulesSnapshot()
+                workScheduler.scheduleAllPendingWhatsApp(pending)
+                whatsAppBotEngine.sweepDueScheduledDispatches()
+            }
+        }
+    }
 }
 
 class PersonalAiApplication : Application() {
@@ -113,6 +155,7 @@ class PersonalAiApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        com.example.runtime.CrashDiagnosticRecorder.install(this)
         container = AppContainer(this)
     }
 }

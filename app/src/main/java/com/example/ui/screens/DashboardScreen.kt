@@ -61,6 +61,7 @@ import com.example.storage.AppSettings
 import com.example.storage.AutomationRuleEntity
 import com.example.storage.ExecutionLogEntity
 import com.example.storage.TaskStatus
+import com.example.voice.VoiceRuntimeState
 import com.example.ui.components.GlassOsCard
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.StatusBadge
@@ -87,6 +88,7 @@ fun DashboardScreen(
     tasks: List<AgentTaskEntity>,
     automations: List<AutomationRuleEntity>,
     recentLogs: List<ExecutionLogEntity>,
+    voiceState: VoiceRuntimeState = VoiceRuntimeState(),
     onRefreshResources: () -> Unit,
     onNavigate: (AppDestination) -> Unit,
     onLaunchSkillPrompt: (String) -> Unit
@@ -223,18 +225,39 @@ fun DashboardScreen(
                     }
                 }
                 Spacer(Modifier.height(8.dp))
-                FilledTonalButton(
-                    onClick = { onNavigate(AppDestination.WhatsAppBot) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("hero_open_whatsapp_bot")
-                ) {
-                    Icon(Icons.Filled.Chat, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        if (settings.waBotEnabled) "WhatsApp AI Bot • Active (Open Studio)"
-                        else "WhatsApp AI Bot Studio (Link & Auto-Manage)"
-                    )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilledTonalButton(
+                        onClick = { onNavigate(AppDestination.WhatsAppBot) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("hero_open_whatsapp_bot")
+                    ) {
+                        Icon(Icons.Filled.Chat, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            if (settings.waBotEnabled) "WhatsApp • Active" else "WhatsApp AI Bot",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    FilledTonalButton(
+                        onClick = { onNavigate(AppDestination.CommandCenter) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("hero_voice_guard_button")
+                    ) {
+                        Icon(Icons.Filled.Security, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            when {
+                                voiceState.isHandsFreeActive -> "Hands-Free ON"
+                                settings.voiceSampleCount > 0 -> "Voice Lock (${settings.voiceSampleCount})"
+                                else -> "Voice Training"
+                            },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
         }

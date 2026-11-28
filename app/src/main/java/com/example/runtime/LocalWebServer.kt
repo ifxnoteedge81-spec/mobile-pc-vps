@@ -74,38 +74,40 @@ class LocalWebServer(
     }
 
     private fun handleClient(client: Socket) {
-        client.use { sock ->
-            val reader = sock.getInputStream().bufferedReader()
-            val requestLine = reader.readLine() ?: return
-            val parts = requestLine.split(" ")
-            val rawEncoded = parts.getOrNull(1)?.substringBefore("?") ?: "/"
-            val rawPath = runCatching {
-                java.net.URLDecoder.decode(rawEncoded, "UTF-8")
-            }.getOrDefault(rawEncoded)
-            val relPath = if (rawPath == "/" || rawPath.isBlank()) "index.html" else rawPath.trimStart('/')
+        runCatching {
+            client.use { sock ->
+                val reader = sock.getInputStream().bufferedReader()
+                val requestLine = reader.readLine() ?: return@use
+                val parts = requestLine.split(" ")
+                val rawEncoded = parts.getOrNull(1)?.substringBefore("?") ?: "/"
+                val rawPath = runCatching {
+                    java.net.URLDecoder.decode(rawEncoded, "UTF-8")
+                }.getOrDefault(rawEncoded)
+                val relPath = if (rawPath == "/" || rawPath.isBlank()) "index.html" else rawPath.trimStart('/')
 
-            val target = runCatching {
-                val candidate = File(workspace.projectsDir, relPath).canonicalFile
-                val base = workspace.projectsDir.canonicalFile
-                if (candidate.path == base.path || candidate.path.startsWith("${base.path}${File.separator}")) candidate else null
-            }.getOrNull()
+                val target = runCatching {
+                    val candidate = File(workspace.projectsDir, relPath).canonicalFile
+                    val base = workspace.projectsDir.canonicalFile
+                    if (candidate.path == base.path || candidate.path.startsWith("${base.path}${File.separator}")) candidate else null
+                }.getOrNull()
 
-            val out = sock.getOutputStream()
-            if (target != null && target.exists() && target.isFile) {
-                val bytes = target.readBytes()
-                val mime = mimeTypeForExtension(target.extension)
-                val header = "HTTP/1.1 200 OK\r\nContent-Type: $mime\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n"
-                out.write(header.toByteArray())
-                out.write(bytes)
-                logRequest("200 GET /$relPath (${bytes.size}B)")
-            } else {
-                val body = "<h1>404 Not Found</h1><p>/$relPath not found in virtual_env/projects</p>".toByteArray()
-                val header = "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n"
-                out.write(header.toByteArray())
-                out.write(body)
-                logRequest("404 GET /$relPath")
+                val out = sock.getOutputStream()
+                if (target != null && target.exists() && target.isFile) {
+                    val bytes = target.readBytes()
+                    val mime = mimeTypeForExtension(target.extension)
+                    val header = "HTTP/1.1 200 OK\r\nContent-Type: $mime\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n"
+                    out.write(header.toByteArray())
+                    out.write(bytes)
+                    logRequest("200 GET /$relPath (${bytes.size}B)")
+                } else {
+                    val body = "<h1>404 Not Found</h1><p>/$relPath not found in virtual_env/projects</p>".toByteArray()
+                    val header = "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n"
+                    out.write(header.toByteArray())
+                    out.write(body)
+                    logRequest("404 GET /$relPath")
+                }
+                out.flush()
             }
-            out.flush()
         }
     }
 

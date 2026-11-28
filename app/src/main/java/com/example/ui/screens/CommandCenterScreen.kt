@@ -79,6 +79,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -109,6 +110,7 @@ import com.example.agent.SkillCategory
 import com.example.browser.BrowserController
 import com.example.browser.BrowserTab
 import com.example.storage.ImportedSkillEntity
+import com.example.voice.VoiceRuntimeState
 import com.example.ui.components.GlassOsCard
 import com.example.ui.components.StatusBadge
 import com.example.ui.components.WebViewUploadChooserDialog
@@ -139,6 +141,10 @@ fun CommandCenterScreen(
     accessibilityConnected: Boolean,
     activeWindowPackage: String,
     liveNodes: List<ObservedUiNode>,
+    voiceState: VoiceRuntimeState = VoiceRuntimeState(),
+    voiceLockEnabled: Boolean = true,
+    voiceMatchThreshold: Float = 0.78f,
+    voiceSpokenFeedback: Boolean = true,
     onAttachFiles: (List<Uri>) -> Unit,
     onRemoveAttachment: (String) -> Unit,
     onAbsorbAttachmentsAsSkills: () -> Unit,
@@ -148,6 +154,11 @@ fun CommandCenterScreen(
     onDeleteImportedSkill: (String) -> Unit,
     onClearAllImportedSkills: () -> Unit = {},
     onSearchSkillsLocal: (String) -> List<ImportedSkillEntity> = { importedSkills.take(80) },
+    onEnrollVoice: () -> Unit = {},
+    onTestVoiceMatch: () -> Unit = {},
+    onClearVoice: () -> Unit = {},
+    onToggleHandsFree: (Boolean) -> Unit = {},
+    onUpdateVoicePrefs: (Boolean?, Float?, Boolean?) -> Unit = { _, _, _ -> },
     onSendCommand: (String) -> Unit,
     onPause: () -> Unit,
     onResume: () -> Unit,
@@ -159,7 +170,8 @@ fun CommandCenterScreen(
     onInspectDeviceScreen: () -> Unit,
     onQuickVirtualHand: (String) -> Unit,
     onClearFeed: () -> Unit,
-    onOpenModelSettings: () -> Unit
+    onOpenModelSettings: () -> Unit,
+    miniAiStats: com.example.ai.MiniAiBrainStats = com.example.ai.MiniAiBrainStats()
 ) {
     val context = LocalContext.current
     var inputText by remember { mutableStateOf("") }
@@ -168,6 +180,7 @@ fun CommandCenterScreen(
     var showLiveScreen by remember { mutableStateOf(false) }
     var liveScreenMode by remember { mutableStateOf("BROWSER") } // "BROWSER" or "VIRTUAL_HANDS"
     var showSkillsSheet by remember { mutableStateOf(false) }
+    var showVoiceSheet by remember { mutableStateOf(false) }
     var showImportedOnly by remember { mutableStateOf(false) }
     var selectedSkillCategory by remember { mutableStateOf<SkillCategory?>(null) }
     var skillImportInput by remember { mutableStateOf("") }
@@ -253,6 +266,29 @@ fun CommandCenterScreen(
         else voiceStatus = "Microphone permission denied. Type your command below."
     }
 
+    var pendingVoiceGuardAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val voiceGuardMicLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            pendingVoiceGuardAction?.invoke()
+        } else {
+            voiceStatus = "ভয়েস ট্রেইনিং ও হ্যান্ডস-ফ্রি চালানোর জন্য মাইক্রোফোন পারমিশন দিন।"
+        }
+        pendingVoiceGuardAction = null
+    }
+
+    fun withVoiceGuardMicPermission(action: () -> Unit) {
+        val granted = ContextCompat.checkSelfPermission(
+            context, Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+        if (granted) action()
+        else {
+            pendingVoiceGuardAction = action
+            voiceGuardMicLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
     val isImeVisible = WindowInsets.isImeVisible
     LaunchedEffect(agentState.feed.size, isImeVisible) {
         if (agentState.feed.isNotEmpty()) {
@@ -261,11 +297,12 @@ fun CommandCenterScreen(
     }
 
     val quickPrompts = listOf(
-        "/py print('Hello from on-device Python!')",
-        "/sh ls -la",
-        "আমার আপলোড করা ফাইলগুলো পড়ে সারসংক্ষেপ দাও।",
-        "Virtual Hands দিয়ে ফোনের অ্যাপ ওপেন করে স্ক্রিন দেখে কাজ করো।",
-        "ব্রাউজারে কাজটি শুরু করো এবং OTP বা CAPTCHA এলে আমাকে লাইভ স্ক্রিন দেখাও।"
+        "ইউনিভার্সাল বাংলা প্রম্পট (সব কাজের জন্য)" to com.example.ai.LocalMiniAiBrain.buildUniversalBanglaPrompt(),
+        "/py print('Hello from on-device Python!')" to "/py print('Hello from on-device Python!')",
+        "/sh ls -la" to "/sh ls -la",
+        "আপলোড করা ফাইলগুলোর সারসংক্ষেপ" to "আমার আপলোড করা ফাইলগুলো পড়ে সারসংক্ষেপ দাও।",
+        "Virtual Hands দিয়ে অ্যাপ নিয়ন্ত্রণ" to "Virtual Hands দিয়ে ফোনের অ্যাপ ওপেন করে স্ক্রিন দেখে কাজ করো।",
+        "ব্রাউজার + OTP/CAPTCHA লাইভ স্ক্রিন" to "ব্রাউজারে কাজটি শুরু করো এবং OTP বা CAPTCHA এলে আমাকে লাইভ স্ক্রিন দেখাও।"
     )
 
     Column(
@@ -343,6 +380,30 @@ fun CommandCenterScreen(
                         modifier = Modifier.testTag("open_skills_sheet_chip")
                     )
                 }
+                item {
+                    FilterChip(
+                        selected = voiceState.isHandsFreeActive || voiceState.enrolledSampleCount > 0,
+                        onClick = { showVoiceSheet = true },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Filled.Mic,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = if (voiceState.isHandsFreeActive) EmeraldPulse else MaterialTheme.colorScheme.primary
+                            )
+                        },
+                        label = {
+                            Text(
+                                when {
+                                    voiceState.isHandsFreeActive -> "Hands-Free ON"
+                                    voiceState.enrolledSampleCount > 0 -> "Voice Guard (${voiceState.enrolledSampleCount})"
+                                    else -> "Voice Guard"
+                                }
+                            )
+                        },
+                        modifier = Modifier.testTag("open_voice_guard_chip")
+                    )
+                }
                 if (!accessibilityConnected) {
                     item {
                         AssistChip(
@@ -362,6 +423,14 @@ fun CommandCenterScreen(
                             modifier = Modifier.testTag("clear_feed_chip")
                         )
                     }
+                }
+                item {
+                    AssistChip(
+                        onClick = onOpenModelSettings,
+                        leadingIcon = { Icon(Icons.Filled.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp), tint = EmeraldPulse) },
+                        label = { Text("Mini AI (${miniAiStats.learnedSamples} • ${miniAiStats.estimatedTokensSaved}t saved)") },
+                        modifier = Modifier.testTag("mini_ai_status_chip")
+                    )
                 }
             }
 
@@ -520,10 +589,10 @@ fun CommandCenterScreen(
                         )
                         Spacer(Modifier.height(10.dp))
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            items(quickPrompts) { sample ->
+                            items(quickPrompts) { (labelText, promptBody) ->
                                 AssistChip(
-                                    onClick = { inputText = sample },
-                                    label = { Text(sample.take(40)) }
+                                    onClick = { inputText = promptBody },
+                                    label = { Text(labelText.take(42)) }
                                 )
                             }
                         }
@@ -968,6 +1037,168 @@ fun CommandCenterScreen(
                     }
                 }
                 Spacer(Modifier.height(14.dp))
+            }
+        }
+    }
+
+    if (showVoiceSheet) {
+        ModalBottomSheet(onDismissRequest = { showVoiceSheet = false }) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Owner Voice Training & Hands-Free Guard",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = NeuralCyan
+                        )
+                        Text(
+                            text = "আপনার কণ্ঠস্বর ট্রেইন করুন — লক চালু থাকলে অন্য কেউ বললেও AI কম্পিউটার কাজ করবে না।",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    StatusBadge(
+                        label = "${voiceState.enrolledSampleCount}/3 Samples",
+                        color = if (voiceState.enrolledSampleCount > 0) EmeraldPulse else AmberWarning
+                    )
+                }
+
+                GlassOsCard(
+                    borderColor = when (voiceState.lastMatchAccepted) {
+                        true -> EmeraldPulse.copy(alpha = 0.6f)
+                        false -> CoralAlert.copy(alpha = 0.6f)
+                        null -> NeuralCyan.copy(alpha = 0.45f)
+                    }
+                ) {
+                    Text(
+                        text = voiceState.statusMessage,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    if (voiceState.isEnrolling || voiceState.isTestingMatch || voiceState.isCapturingSpeech) {
+                        Spacer(Modifier.height(6.dp))
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                    voiceState.lastMatchScorePercent?.let { pct ->
+                        Spacer(Modifier.height(6.dp))
+                        StatusBadge(
+                            label = "Last Match Score: $pct% (${if (voiceState.lastMatchAccepted == true) "OWNER VERIFIED" else "REJECTED"})",
+                            color = if (voiceState.lastMatchAccepted == true) EmeraldPulse else CoralAlert
+                        )
+                    }
+                    if (voiceState.lastTranscript.isNotBlank()) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = "Last Command: \"${voiceState.lastTranscript}\"",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = NeuralCyan
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = { withVoiceGuardMicPermission { onEnrollVoice() } },
+                        enabled = !voiceState.isEnrolling && !voiceState.isTestingMatch,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("voice_enroll_button")
+                    ) {
+                        Icon(Icons.Filled.Mic, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(if (voiceState.isEnrolling) "Recording..." else "Train Voice")
+                    }
+                    OutlinedButton(
+                        onClick = { withVoiceGuardMicPermission { onTestVoiceMatch() } },
+                        enabled = voiceState.enrolledSampleCount > 0 && !voiceState.isEnrolling && !voiceState.isTestingMatch,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("voice_test_match_button")
+                    ) {
+                        Icon(Icons.Filled.Verified, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(if (voiceState.isTestingMatch) "Testing..." else "Test Match %")
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Hands-Free Continuous Voice Mode", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                    Switch(
+                        checked = voiceState.isHandsFreeActive,
+                        onCheckedChange = { enable ->
+                            if (enable) withVoiceGuardMicPermission { onToggleHandsFree(true) }
+                            else onToggleHandsFree(false)
+                        },
+                        modifier = Modifier.testTag("voice_hands_free_switch")
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Owner Voiceprint Lock (শুধু আপনার কণ্ঠ)", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                    Switch(
+                        checked = voiceLockEnabled,
+                        onCheckedChange = { onUpdateVoicePrefs(it, null, null) },
+                        modifier = Modifier.testTag("voice_lock_switch")
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Speak Reply Back (Bangla/English TTS)", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                    Switch(
+                        checked = voiceSpokenFeedback,
+                        onCheckedChange = { onUpdateVoicePrefs(null, null, it) },
+                        modifier = Modifier.testTag("voice_tts_switch")
+                    )
+                }
+
+                Column {
+                    Text(
+                        text = "Voice Match Sensitivity Threshold: ${(voiceMatchThreshold * 100).toInt()}%",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Slider(
+                        value = voiceMatchThreshold,
+                        onValueChange = { onUpdateVoicePrefs(null, it, null) },
+                        valueRange = 0.65f..0.90f
+                    )
+                }
+
+                if (voiceState.enrolledSampleCount > 0) {
+                    TextButton(
+                        onClick = onClearVoice,
+                        modifier = Modifier.align(Alignment.End)
+                    ) {
+                        Icon(Icons.Filled.Delete, contentDescription = null, modifier = Modifier.size(16.dp), tint = CoralAlert)
+                        Spacer(Modifier.width(4.dp))
+                        Text("Reset Voiceprint", color = CoralAlert)
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
             }
         }
     }

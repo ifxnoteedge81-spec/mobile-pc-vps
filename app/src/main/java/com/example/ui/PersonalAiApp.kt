@@ -117,9 +117,14 @@ fun PersonalAiApp(
     val skillImportProgress by viewModel.skillImportProgress.collectAsStateWithLifecycle()
     val whatsAppChats by viewModel.whatsAppChats.collectAsStateWithLifecycle()
     val whatsAppActivity by viewModel.whatsAppActivity.collectAsStateWithLifecycle()
+    val whatsAppSchedules by viewModel.whatsAppSchedules.collectAsStateWithLifecycle()
     val whatsAppState by viewModel.whatsAppState.collectAsStateWithLifecycle()
     val whatsAppLinkStatus by viewModel.whatsAppLinkStatus.collectAsStateWithLifecycle()
     val whatsAppPairingCode by viewModel.whatsAppPairingCode.collectAsStateWithLifecycle()
+    val voiceState by viewModel.voiceState.collectAsStateWithLifecycle()
+    val miniAiStats by viewModel.miniAiStats.collectAsStateWithLifecycle()
+    val miniAiSamples by viewModel.miniAiSamples.collectAsStateWithLifecycle()
+    val lastCrashReport by viewModel.lastCrashReport.collectAsStateWithLifecycle()
     val statusBanner by viewModel.statusBanner.collectAsStateWithLifecycle()
     val availableUpdate by viewModel.availableUpdate.collectAsStateWithLifecycle()
     val isCheckingUpdate by viewModel.isCheckingUpdate.collectAsStateWithLifecycle()
@@ -304,6 +309,7 @@ fun PersonalAiApp(
                                     tasks = tasks,
                                     automations = automationRules,
                                     recentLogs = recentLogs,
+                                    voiceState = voiceState,
                                     onRefreshResources = viewModel::refreshResources,
                                     onNavigate = ::navigateTo,
                                     onLaunchSkillPrompt = viewModel::sendAgentCommand
@@ -326,6 +332,10 @@ fun PersonalAiApp(
                                     accessibilityConnected = accessibilityConnected,
                                     activeWindowPackage = activeWindowPkg,
                                     liveNodes = liveAccessibilityNodes.ifEmpty { observedNodes },
+                                    voiceState = voiceState,
+                                    voiceLockEnabled = settings.voiceLockEnabled,
+                                    voiceMatchThreshold = settings.voiceMatchThreshold,
+                                    voiceSpokenFeedback = settings.voiceSpokenFeedbackEnabled,
                                     onAttachFiles = { uris -> viewModel.attachPickedFiles(context, uris) },
                                     onRemoveAttachment = viewModel::removePendingAttachment,
                                     onAbsorbAttachmentsAsSkills = viewModel::absorbPendingAttachmentsAsSkills,
@@ -335,6 +345,11 @@ fun PersonalAiApp(
                                     onDeleteImportedSkill = viewModel::deleteImportedSkill,
                                     onClearAllImportedSkills = viewModel::clearAllImportedSkills,
                                     onSearchSkillsLocal = { q -> viewModel.searchImportedSkillsLocal(q, importedSkills) },
+                                    onEnrollVoice = viewModel::enrollOwnerVoiceSample,
+                                    onTestVoiceMatch = viewModel::testOwnerVoiceMatch,
+                                    onClearVoice = viewModel::clearOwnerVoice,
+                                    onToggleHandsFree = viewModel::toggleVoiceHandsFree,
+                                    onUpdateVoicePrefs = viewModel::updateVoicePreferences,
                                     onSendCommand = viewModel::sendAgentCommand,
                                     onPause = viewModel::pauseAgent,
                                     onResume = viewModel::resumeAgent,
@@ -346,7 +361,8 @@ fun PersonalAiApp(
                                     onInspectDeviceScreen = viewModel::inspectDeviceScreen,
                                     onQuickVirtualHand = { act -> viewModel.testVirtualHandGesture(act) },
                                     onClearFeed = viewModel::clearAgentFeed,
-                                    onOpenModelSettings = { navigateTo(AppDestination.AiModelSettings) }
+                                    onOpenModelSettings = { navigateTo(AppDestination.AiModelSettings) },
+                                    miniAiStats = miniAiStats
                                 )
                             }
                             composable(AppDestination.WhatsAppBot.route) {
@@ -360,6 +376,7 @@ fun PersonalAiApp(
                                         viewModel.hasSecret(SecretSlot.OPENROUTER_API_KEY),
                                     chats = whatsAppChats,
                                     activityLogs = whatsAppActivity,
+                                    schedules = whatsAppSchedules,
                                     webBridge = viewModel.whatsAppWebBridge,
                                     observeChatMessages = viewModel::observeWhatsAppChatMessages,
                                     onRefreshStatus = viewModel::refreshWhatsAppStatus,
@@ -372,6 +389,10 @@ fun PersonalAiApp(
                                     onSendMessage = viewModel::sendWhatsAppMessage,
                                     onUpdateChatRules = viewModel::updateWhatsAppChatRules,
                                     onDeleteChat = viewModel::deleteWhatsAppChatRecord,
+                                    onScheduleCampaign = viewModel::scheduleWhatsAppCampaign,
+                                    onRunScheduleNow = viewModel::runWhatsAppScheduleNow,
+                                    onCancelSchedule = viewModel::cancelWhatsAppSchedule,
+                                    onDeleteSchedule = viewModel::deleteWhatsAppSchedule,
                                     onOpenModelSettings = { navigateTo(AppDestination.AiModelSettings) }
                                 )
                             }
@@ -493,7 +514,13 @@ fun PersonalAiApp(
                                     onFetchGeminiModels = { viewModel.fetchGeminiModels() },
                                     onFetchOpenRouterModels = viewModel::fetchOpenRouterModels,
                                     onSaveProviderConfig = viewModel::updateProviderConfig,
-                                    onChangeTheme = viewModel::updateThemeMode
+                                    onChangeTheme = viewModel::updateThemeMode,
+                                    miniAiStats = miniAiStats,
+                                    miniAiSamples = miniAiSamples,
+                                    onUpdateMiniAiPrefs = viewModel::updateMiniAiPrefs,
+                                    onTeachMiniAi = viewModel::trainMiniAi,
+                                    onDeleteMiniAiSample = viewModel::deleteMiniAiSample,
+                                    onResetMiniAi = viewModel::resetMiniAiKnowledge
                                 )
                             }
                             composable(AppDestination.ResourceManager.route) {
@@ -521,7 +548,9 @@ fun PersonalAiApp(
                                     availableUpdate = availableUpdate,
                                     isCheckingUpdate = isCheckingUpdate,
                                     onCheckForUpdate = { viewModel.checkForAppUpdate(silent = false) },
-                                    onDownloadInPlaceUpdate = viewModel::launchInPlaceUpdate
+                                    onDownloadInPlaceUpdate = viewModel::launchInPlaceUpdate,
+                                    lastCrashReport = lastCrashReport,
+                                    onClearCrashReport = viewModel::clearLastCrashReport
                                 )
                             }
                         }

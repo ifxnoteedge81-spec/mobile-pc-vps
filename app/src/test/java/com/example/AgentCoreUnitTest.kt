@@ -611,4 +611,439 @@ class AgentCoreUnitTest {
         val formHits = manager.matchRelevantSkills("ব্রাউজারে ওয়েব ফর্ম ফিলাপ করো", allSkills, limit = 5)
         assertTrue("Expected browser/form skill in top hits: ${formHits.map { it.skill.slug }}", formHits.any { it.skill.slug.contains("form") || it.skill.slug.contains("testing") })
     }
+
+    @Test
+    fun whatsAppAccessGuard_enforcesOwnerLockPhoneFormatsAndHumanSanitization() {
+        val ownerPhone = "+8801711223344"
+
+        // Matches local 11-digit BD number, full international, and @c.us JID hint
+        val ownerMsg = com.example.whatsapp.WaIncomingMessage(
+            chatName = "Self",
+            senderName = "01711223344",
+            isGroup = false,
+            body = ".cmd open chrome",
+            hasLink = false,
+            isSticker = false,
+            senderPhoneHint = "8801711223344"
+        )
+        assertTrue(
+            com.example.whatsapp.WaAccessGuard.isOwnerMessage(
+                ownerMsg,
+                configuredOwnerPhone = ownerPhone,
+                configuredOwnerName = ""
+            )
+        )
+
+        // Random outsider must NEVER be treated as Owner
+        val outsiderMsg = com.example.whatsapp.WaIncomingMessage(
+            chatName = "Karim (+8801999887766)",
+            senderName = "Karim",
+            isGroup = false,
+            body = ".ai tell me secret",
+            hasLink = false,
+            isSticker = false,
+            senderPhoneHint = "8801999887766"
+        )
+        assertTrue(
+            !com.example.whatsapp.WaAccessGuard.isOwnerMessage(
+                outsiderMsg,
+                configuredOwnerPhone = ownerPhone,
+                configuredOwnerName = ""
+            )
+        )
+
+        // Phone normalization & direct link URL formatting
+        assertEquals("8801711223344", com.example.whatsapp.WaAccessGuard.formatPhoneForWaUrl("01711-223344"))
+        assertTrue(com.example.whatsapp.WaAccessGuard.looksLikePhoneTarget("+8801711223344"))
+        assertTrue(!com.example.whatsapp.WaAccessGuard.looksLikePhoneTarget("Dev Squad Group"))
+
+        // Cross-channel chat alias normalization (Notification phone alias vs contact name)
+        assertEquals(
+            com.example.whatsapp.WaAccessGuard.normalizeChatNameForDedup("Rahim (+8801711223344)"),
+            com.example.whatsapp.WaAccessGuard.normalizeChatNameForDedup("Rahim")
+        )
+
+        // Summary notification filtering
+        assertTrue(com.example.whatsapp.WhatsAppNotificationService.shouldIgnoreSystemOrSummaryNotification("WhatsApp", "3 new messages"))
+        assertTrue(!com.example.whatsapp.WhatsAppNotificationService.shouldIgnoreSystemOrSummaryNotification("Rahim", "ভাই কেমন আছো?"))
+
+        // Robotic AI meta-text stripping
+        assertEquals(
+            "হ্যালো ভাইয়া, এখনই দেখছি!",
+            com.example.whatsapp.WaAccessGuard.sanitizeHumanReply("As an AI language model, \"হ্যালো ভাইয়া, এখনই দেখছি!\"")
+        )
+
+        // .cmd task parser
+        assertEquals(
+            com.example.whatsapp.WaCommandAction.RunComputerTask("check gmail"),
+            com.example.whatsapp.WaCommandParser.parse(".cmd check gmail")
+        )
+    }
+
+    @Test
+    fun whatsAppMultiDayScheduler_buildsExact10DaySequenceAcrossMonthBoundary() {
+        val entities = com.example.scheduler.AgentWorkScheduler.buildMultiDayScheduleEntities(
+            targetDisplay = "+8801711223344",
+            isGroup = false,
+            defaultMessageTemplate = "Fallback Day {day}/{total}",
+            useAiCompose = true,
+            startYear = 2026,
+            startMonth1To12 = 11,
+            startDayOfMonth = 28,
+            hour = 9,
+            minute = 30,
+            totalDays = 10,
+            dailyMessages = listOf("Day 1: Intro", "Day 2: Followup", "Day 3: Demo")
+        )
+        assertEquals(10, entities.size)
+        assertEquals("Day 1: Intro", entities[0].messageTemplate)
+        assertEquals("Day 3: Demo", entities[2].messageTemplate)
+        assertEquals("Fallback Day {day}/{total}", entities[3].messageTemplate)
+        assertEquals(1, entities[0].dayIndex)
+        assertEquals(10, entities[9].dayIndex)
+
+        val cal = java.util.Calendar.getInstance().apply { timeInMillis = entities[9].scheduledAtMillis }
+        assertEquals(2026, cal.get(java.util.Calendar.YEAR))
+        assertEquals(java.util.Calendar.DECEMBER, cal.get(java.util.Calendar.MONTH))
+        assertEquals(7, cal.get(java.util.Calendar.DAY_OF_MONTH))
+        assertEquals(9, cal.get(java.util.Calendar.HOUR_OF_DAY))
+        assertEquals(30, cal.get(java.util.Calendar.MINUTE))
+    }
+
+    @Test
+    fun speakerVoiceprint_distinguishesOwnerVoiceFromDifferentVoiceAndNoise() {
+        val sampleRate = 16_000
+        val totalSamples = sampleRate * 2 // 2 seconds
+
+        fun synthesizeHarmonicVoice(f0Hz: Double, formantBoostHz: Double, amplitude: Double): ShortArray {
+            val out = ShortArray(totalSamples)
+            for (i in 0 until totalSamples) {
+                val t = i.toDouble() / sampleRate
+                // Syllabic amplitude envelope so VAD triggers naturally
+                val env = 0.55 + 0.45 * kotlin.math.sin(2.0 * Math.PI * 3.0 * t)
+                var sig = 0.0
+                for (h in 1..12) {
+                    val freq = f0Hz * h
+                    val dist = (freq - formantBoostHz) / 420.0
+                    val weight = (1.0 / (1.0 + dist * dist)) + 0.15 / h
+                    sig += weight * kotlin.math.sin(2.0 * Math.PI * freq * t)
+                }
+                val s = (sig * env * amplitude * 4500.0).coerceIn(-32000.0, 32000.0)
+                out[i] = s.toInt().toShort()
+            }
+            return out
+        }
+
+        // Owner voice (120Hz fundamental, 650Hz vocal tract formant) — enrollment vs test at different volume
+        val ownerEnroll = synthesizeHarmonicVoice(f0Hz = 120.0, formantBoostHz = 650.0, amplitude = 1.0)
+        val ownerVerify = synthesizeHarmonicVoice(f0Hz = 123.0, formantBoostHz = 670.0, amplitude = 0.65)
+        // Intruder voice (higher 245Hz fundamental, shifted 2400Hz formant)
+        val intruderVoice = synthesizeHarmonicVoice(f0Hz = 245.0, formantBoostHz = 2400.0, amplitude = 1.0)
+
+        val ownerEmb1 = com.example.voice.SpeakerVoiceprintManager.extractAcousticEmbedding(ownerEnroll).getOrThrow()
+        val ownerEmb2 = com.example.voice.SpeakerVoiceprintManager.extractAcousticEmbedding(ownerVerify).getOrThrow()
+        val intruderEmb = com.example.voice.SpeakerVoiceprintManager.extractAcousticEmbedding(intruderVoice).getOrThrow()
+
+        val mergedOwner = com.example.voice.SpeakerVoiceprintManager.mergeEnrollments(null, ownerEmb1, 0)
+        val jsonRoundTrip = com.example.voice.SpeakerVoiceprintManager.decodeEmbedding(
+            com.example.voice.SpeakerVoiceprintManager.encodeEmbedding(mergedOwner)
+        )!!
+
+        val sameSpeakerScore = com.example.voice.SpeakerVoiceprintManager.computeSimilarityScore(jsonRoundTrip, ownerEmb2)
+        val intruderScore = com.example.voice.SpeakerVoiceprintManager.computeSimilarityScore(jsonRoundTrip, intruderEmb)
+
+        assertTrue(
+            "Expected same speaker score ($sameSpeakerScore) >= 0.80f",
+            sameSpeakerScore >= 0.80f
+        )
+        assertTrue(
+            "Expected same speaker ($sameSpeakerScore) clearly above intruder ($intruderScore)",
+            sameSpeakerScore - intruderScore >= 0.15f && intruderScore < 0.78f
+        )
+    }
+
+    @Test
+    fun accessibilitySafetyGuard_stressTest300Iterations() {
+        val heavyScrollApps = listOf(
+            "com.facebook.katana",
+            "com.facebook.lite",
+            "com.instagram.android",
+            "com.zhiliaoapp.musically",
+            "com.google.android.youtube",
+            "com.android.chrome"
+        )
+        val protectedApps = listOf(
+            "com.bKash.customerapp",
+            "com.konasl.nagad",
+            "com.agilebits.onepassword",
+            "com.google.android.apps.authenticator2"
+        )
+
+        var checksRun = 0
+        for (i in 0 until 300) {
+            val pkg = heavyScrollApps[i % heavyScrollApps.size]
+            val nowMs = 10_000L + (i * 50L)
+            val lastMs = nowMs - 250L
+
+            // Idle user watching Facebook Reels / Instagram / TikTok must NEVER trigger scroll/content traversal
+            assertTrue(
+                "Idle scroll burst should be dropped at iteration $i",
+                !com.example.runtime.AccessibilitySafetyGuard.shouldProcessAccessibilityEvent(
+                    pkg = pkg,
+                    eventType = android.view.accessibility.AccessibilityEvent.TYPE_VIEW_SCROLLED,
+                    isAgentBusy = false,
+                    nowMs = nowMs,
+                    lastTraverseMs = lastMs
+                )
+            )
+            assertTrue(
+                "Idle window content burst should be dropped at iteration $i",
+                !com.example.runtime.AccessibilitySafetyGuard.shouldProcessAccessibilityEvent(
+                    pkg = pkg,
+                    eventType = android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
+                    isAgentBusy = false,
+                    nowMs = nowMs,
+                    lastTraverseMs = lastMs
+                )
+            )
+
+            // Protected banking/auth apps must NEVER be traversed even when agent is busy
+            val bankingPkg = protectedApps[i % protectedApps.size]
+            assertTrue(
+                "Protected app $bankingPkg leaked traversal at iteration $i",
+                !com.example.runtime.AccessibilitySafetyGuard.shouldProcessAccessibilityEvent(
+                    pkg = bankingPkg,
+                    eventType = android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+                    isAgentBusy = true,
+                    nowMs = nowMs + 5000L,
+                    lastTraverseMs = 0L
+                )
+            )
+
+            // Active agent burst passes when past throttle window
+            assertTrue(
+                "Active agent state change should process after throttle at iteration $i",
+                com.example.runtime.AccessibilitySafetyGuard.shouldProcessAccessibilityEvent(
+                    pkg = pkg,
+                    eventType = android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+                    isAgentBusy = true,
+                    nowMs = nowMs + 300L,
+                    lastTraverseMs = nowMs
+                )
+            )
+
+            // Coordinate clamping against NaN, Infinity, negatives, and huge extents
+            val clampedNan = com.example.runtime.AccessibilitySafetyGuard.clampCoordinate(Float.NaN, 1080f)
+            val clampedInf = com.example.runtime.AccessibilitySafetyGuard.clampCoordinate(Float.POSITIVE_INFINITY, 1080f)
+            val clampedNeg = com.example.runtime.AccessibilitySafetyGuard.clampCoordinate(-500f - i, 1080f)
+            val clampedHigh = com.example.runtime.AccessibilitySafetyGuard.clampCoordinate(5000f + i, 1080f)
+            assertTrue(clampedNan == 1f && clampedInf == 1f && clampedNeg == 1f && clampedHigh == 1079f)
+
+            // Bounds visibility check
+            val onScreen = com.example.runtime.AccessibilitySafetyGuard.isVisibleOnScreen(
+                left = 10, top = 20, right = 120, bottom = 80, screenW = 1080, screenH = 2400
+            )
+            val offScreen = com.example.runtime.AccessibilitySafetyGuard.isVisibleOnScreen(
+                left = 1200 + i, top = 20, right = 1300 + i, bottom = 80, screenW = 1080, screenH = 2400
+            )
+            assertTrue(onScreen && !offScreen)
+            checksRun++
+        }
+        assertEquals(300, checksRun)
+    }
+
+    @Test
+    fun localMiniAiBrain_stressTest350Iterations() {
+        val brainFile = java.io.File(tempFolder.newFolder("mini_ai"), "mini_ai_brain.json")
+        val brain = com.example.ai.LocalMiniAiBrain(brainFile)
+
+        // 1. Starter Bangla/Banglish/English matching & action rejection safety
+        assertTrue(brain.inferReply("হ্যালো", channel = "AGENT") != null)
+        assertTrue(brain.inferReply("kemon acho", channel = "AGENT") != null)
+        assertTrue(brain.inferReply("তুমি কি কি করতে পারো", channel = "AGENT") != null)
+        assertTrue(brain.inferReply("how are you", channel = "AGENT") != null)
+        assertTrue(brain.inferReply("open facebook reels", channel = "AGENT") == null)
+        assertTrue(brain.inferReply("জিমেইল অ্যাকাউন্ট তৈরি করো", channel = "AGENT") == null)
+        assertTrue(brain.inferReply("/py print(1)", channel = "AGENT") == null)
+        assertTrue(com.example.ai.LocalMiniAiBrain.buildUniversalBanglaPrompt().contains("Virtual Hands"))
+
+        // 2. Teach custom Bangla Q&A & block sensitive secrets
+        val taught = brain.teachCustomPair("দোকানের ঠিকানা কি?", "আমাদের অফিস ঢাকা মিরপুর-১০ এ অবস্থিত।")
+        assertTrue(taught.isSuccess)
+        val blockedSecret = brain.teachCustomPair("my api key", "AIzaSyFakeKey1234567890")
+        assertTrue(blockedSecret.isFailure)
+        val blockedOtp = brain.teachCustomPair("amar otp koto", "otp: 4589")
+        assertTrue(blockedOtp.isFailure)
+
+        // 3. 350+ mixed inference & continual learning iterations (including >1500 eviction test)
+        var successfulHits = 0
+        for (i in 0 until 350) {
+            val q = "কাস্টম প্রশ্ন নম্বর $i এর তথ্য কি?"
+            val a = "কাস্টম উত্তর নম্বর $i — লোকাল মেমরি থেকে দ্রুত উত্তর।"
+            assertTrue(brain.learnFromCloudTurn(q, a, channel = "AGENT"))
+
+            val hitExact = brain.inferReply(q, minConfidence = 0.78f, channel = "AGENT")
+            if (hitExact != null && hitExact.reply == a) {
+                successfulHits++
+            }
+            val starterHit = brain.inferReply(
+                if (i % 2 == 0) "কেমন আছো" else "দোকানের ঠিকানা কি?",
+                minConfidence = 0.72f,
+                channel = "AGENT"
+            )
+            assertTrue("Expected starter/taught hit at iteration $i", starterHit != null)
+        }
+        assertTrue("Expected high recall >= 340/350, got $successfulHits", successfulHits >= 340)
+        assertTrue(brain.getStatsSnapshot().estimatedTokensSaved > 50_000L)
+
+        // 4. Reload from disk and verify starter + user-taught sample + stats survived
+        val reloaded = com.example.ai.LocalMiniAiBrain(brainFile)
+        val reloadedHit = reloaded.inferReply("দোকানের ঠিকানা কি?", minConfidence = 0.74f, channel = "AGENT")
+        assertEquals("আমাদের অফিস ঢাকা মিরপুর-১০ এ অবস্থিত।", reloadedHit?.reply)
+        assertTrue(reloaded.getStatsSnapshot().starterSamples >= 20)
+    }
+
+    @Test
+    fun whatsAppGuardModerationAndScheduler_stressTest300Iterations() {
+        val ownerPhone = "+8801711223344"
+        for (i in 0 until 300) {
+            val variantSender = when (i % 3) {
+                0 -> "01711223344"
+                1 -> "8801711223344"
+                else -> "+8801711223344"
+            }
+            val ownerMsg = com.example.whatsapp.WaIncomingMessage(
+                chatName = "Owner",
+                senderName = variantSender,
+                isGroup = i % 2 == 0,
+                body = ".cmd task $i",
+                hasLink = false,
+                isSticker = false,
+                senderPhoneHint = variantSender
+            )
+            assertTrue(com.example.whatsapp.WaAccessGuard.isOwnerMessage(ownerMsg, ownerPhone, "Owner"))
+
+            val outsiderPhone = "88019${10000000L + i}"
+            val outsiderMsg = com.example.whatsapp.WaIncomingMessage(
+                chatName = "Contact $i ($outsiderPhone)",
+                senderName = "Contact $i",
+                isGroup = i % 2 == 0,
+                body = "হ্যালো ভাই #$i",
+                hasLink = i % 5 == 0,
+                isSticker = i % 7 == 0,
+                senderPhoneHint = outsiderPhone
+            )
+            assertTrue(!com.example.whatsapp.WaAccessGuard.isOwnerMessage(outsiderMsg, ownerPhone, "Owner"))
+
+            val sanitized = com.example.whatsapp.WaAccessGuard.sanitizeHumanReply(
+                "As an AI language model, \"হ্যালো ভাই #$i, এখনই দেখছি!\""
+            )
+            assertEquals("হ্যালো ভাই #$i, এখনই দেখছি!", sanitized)
+
+            assertEquals(
+                com.example.whatsapp.WaAccessGuard.normalizeChatNameForDedup("User$i (+$outsiderPhone)"),
+                com.example.whatsapp.WaAccessGuard.normalizeChatNameForDedup("User$i")
+            )
+
+            val parsed = com.example.whatsapp.WaCommandParser.parse(".ai write note $i")
+            assertEquals(com.example.whatsapp.WaCommandAction.AskAi("write note $i"), parsed)
+
+            val days = (i % 30) + 1
+            val sched = com.example.scheduler.AgentWorkScheduler.buildMultiDayScheduleEntities(
+                targetDisplay = "+$outsiderPhone",
+                isGroup = false,
+                defaultMessageTemplate = "Day {day} msg $i",
+                useAiCompose = false,
+                startYear = 2026,
+                startMonth1To12 = 12,
+                startDayOfMonth = 15,
+                hour = 10,
+                minute = 15,
+                totalDays = days
+            )
+            assertEquals(days, sched.size)
+        }
+    }
+
+    @Test
+    fun monotonicIdAndPopupBot_stressTest250Iterations() {
+        val seenIds = java.util.Collections.synchronizedSet(HashSet<Long>())
+        val threads = (0 until 5).map { tIdx ->
+            Thread {
+                for (j in 0 until 60) {
+                    val id = com.example.runtime.MonotonicIdGenerator.nextId()
+                    assertTrue("Duplicate ID $id on thread $tIdx", seenIds.add(id))
+                }
+            }.apply { start() }
+        }
+        threads.forEach { it.join() }
+        assertEquals(300, seenIds.size)
+
+        for (i in 0 until 250) {
+            val safeCloseNodes = listOf(
+                com.example.accessibility.ObservedUiNode(
+                    text = "Allow",
+                    contentDesc = "Allow",
+                    className = "android.widget.Button",
+                    bounds = "[100,100][300,200]",
+                    centerX = 200f,
+                    centerY = 150f,
+                    clickable = true,
+                    editable = false
+                ),
+                com.example.accessibility.ObservedUiNode(
+                    text = "Allow app to access camera?",
+                    contentDesc = "",
+                    className = "android.widget.TextView",
+                    bounds = "[50,50][500,90]",
+                    centerX = 275f,
+                    centerY = 70f,
+                    clickable = false,
+                    editable = false
+                )
+            )
+            val safeHit = com.example.agent.ZeroLatencyBotEngine.findSafePopupDismissTarget(
+                "com.google.android.permissioncontroller",
+                safeCloseNodes
+            )
+            assertEquals("Allow", safeHit?.text)
+
+            val dangerousNodes = listOf(
+                com.example.accessibility.ObservedUiNode(
+                    text = "Buy Now",
+                    contentDesc = "Buy Now",
+                    className = "android.widget.Button",
+                    bounds = "[100,100][300,200]",
+                    centerX = 200f,
+                    centerY = 150f,
+                    clickable = true,
+                    editable = false
+                ),
+                com.example.accessibility.ObservedUiNode(
+                    text = "Pay $99",
+                    contentDesc = "Pay $99",
+                    className = "android.widget.Button",
+                    bounds = "[100,250][300,350]",
+                    centerX = 200f,
+                    centerY = 300f,
+                    clickable = true,
+                    editable = false
+                )
+            )
+            val blockedPayment = com.example.agent.ZeroLatencyBotEngine.findSafePopupDismissTarget(
+                "com.example.shop",
+                dangerousNodes
+            )
+            assertEquals(null, blockedPayment)
+
+            // Protected banking package must return null even for harmless buttons
+            assertEquals(
+                null,
+                com.example.agent.ZeroLatencyBotEngine.findSafePopupDismissTarget(
+                    "com.bKash.customerapp",
+                    safeCloseNodes
+                )
+            )
+        }
+    }
 }

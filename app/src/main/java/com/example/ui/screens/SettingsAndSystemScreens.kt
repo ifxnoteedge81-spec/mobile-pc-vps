@@ -92,7 +92,13 @@ fun AiModelSettingsScreen(
     onFetchGeminiModels: () -> Unit,
     onFetchOpenRouterModels: () -> Unit,
     onSaveProviderConfig: (AiProviderType, String, String, Boolean, Boolean, Boolean, Boolean) -> Unit,
-    onChangeTheme: (ThemeMode) -> Unit
+    onChangeTheme: (ThemeMode) -> Unit,
+    miniAiStats: com.example.ai.MiniAiBrainStats = com.example.ai.MiniAiBrainStats(),
+    miniAiSamples: List<com.example.ai.MiniAiSample> = emptyList(),
+    onUpdateMiniAiPrefs: (Boolean?, Float?) -> Unit = { _, _ -> },
+    onTeachMiniAi: (String, String) -> Unit = { _, _ -> },
+    onDeleteMiniAiSample: (String) -> Unit = {},
+    onResetMiniAi: () -> Unit = {}
 ) {
     var openRouterKeyInput by remember { mutableStateOf("") }
     var ytTokenInput by remember { mutableStateOf("") }
@@ -269,7 +275,7 @@ fun AiModelSettingsScreen(
                             label = { Text("Auto (API অনুযায়ী সিলেক্ট)") }
                         )
                     }
-                    items(geminiModels, key = { it.id }) { m ->
+                    items(geminiModels.distinctBy { it.id }, key = { it.id }) { m ->
                         FilterChip(
                             selected = selectedGemini == m.id,
                             onClick = { selectedGemini = m.id },
@@ -307,7 +313,7 @@ fun AiModelSettingsScreen(
                             label = { Text("Auto (API অনুযায়ী সিলেক্ট)") }
                         )
                     }
-                    items(visibleOrModels, key = { it.id }) { m ->
+                    items(visibleOrModels.distinctBy { it.id }, key = { it.id }) { m ->
                         FilterChip(
                             selected = selectedOpenRouter == m.id,
                             onClick = { selectedOpenRouter = m.id },
@@ -328,6 +334,118 @@ fun AiModelSettingsScreen(
                     modifier = Modifier.fillMaxWidth().testTag("save_router_config_button")
                 ) {
                     Text("Save Router Settings")
+                }
+            }
+        }
+
+        // On-Device Self-Learning Mini AI Brain (Zero-Token Saver)
+        item {
+            var teachInput by remember { mutableStateOf("") }
+            var teachReply by remember { mutableStateOf("") }
+            var miniEnabled by remember(settings.miniAiEnabled) { mutableStateOf(settings.miniAiEnabled) }
+            var miniConf by remember(settings.miniAiTokenSaverConfidence) {
+                mutableFloatStateOf(settings.miniAiTokenSaverConfidence)
+            }
+            GlassOsCard(borderColor = EmeraldPulse.copy(alpha = 0.45f)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("On-Device Mini AI Brain (Bangla • Token Saver)", style = MaterialTheme.typography.titleSmall)
+                    StatusBadge(
+                        label = "${miniAiStats.estimatedTokensSaved} Tokens Saved",
+                        color = EmeraldPulse
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "সতর্কতা: ১ বিলিয়ন (1B) ওয়েটের আসল ট্রান্সফরমার মডেল ~১-২ GB হওয়ায় স্ট্যান্ডার্ড APK-তে রাখা যায় না। এই ডিভাইস-ভিত্তিক Mini AI (লাইটওয়েট বাংলা/Banglish/English সেম্যান্টিক লার্নার) প্রতিটি Cloud রিপ্লাই ও আপনার শেখানো প্রশ্ন-উত্তর থেকে শিখে সাধারণ চ্যাট ও পুনরাবৃত্তি প্রশ্নগুলো ইন্টারনেট/টোকেন ছাড়াই (০ টোকেনে) উত্তর দেয়; জটিল কাজ সরাসরি Cloud Gemini/OpenRouter-এ চলে।",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    StatusBadge(label = "Learned: ${miniAiStats.learnedSamples}", color = NeuralCyan)
+                    StatusBadge(label = "Local Hits: ${miniAiStats.localRepliesServed}", color = EmeraldPulse)
+                }
+                Spacer(Modifier.height(8.dp))
+                SwitchRow("Mini AI Token Saver চালু রাখুন (0 Tokens)", miniEnabled) {
+                    miniEnabled = it
+                    onUpdateMiniAiPrefs(it, null)
+                }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Confidence Threshold: ${(miniConf * 100).roundToInt()}% (উচ্চ মান দিলে কেবল নিশ্চিত উত্তর লোকালি যাবে)",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Slider(
+                    value = miniConf,
+                    onValueChange = { miniConf = it },
+                    onValueChangeFinished = { onUpdateMiniAiPrefs(null, miniConf) },
+                    valueRange = 0.65f..0.94f
+                )
+                Spacer(Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = teachInput,
+                    onValueChange = { teachInput = it },
+                    label = { Text("Mini AI-কে শেখান: প্রশ্ন / মেসেজ") },
+                    placeholder = { Text("যেমন: দোকানের ঠিকানা কি? / price koto") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("mini_ai_teach_input")
+                )
+                Spacer(Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = teachReply,
+                    onValueChange = { teachReply = it },
+                    label = { Text("যে উত্তর দেবে (০ টোকেন রিপ্লাই)") },
+                    placeholder = { Text("যেমন: আমাদের শোরুম ঢাকায় অবস্থিত।") },
+                    modifier = Modifier.fillMaxWidth().testTag("mini_ai_teach_reply")
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = {
+                            onTeachMiniAi(teachInput, teachReply)
+                            if (teachInput.isNotBlank() && teachReply.isNotBlank()) {
+                                teachInput = ""
+                                teachReply = ""
+                            }
+                        },
+                        modifier = Modifier.testTag("mini_ai_teach_button")
+                    ) { Text("Teach Mini AI") }
+                    OutlinedButton(
+                        onClick = onResetMiniAi,
+                        modifier = Modifier.testTag("mini_ai_reset_button")
+                    ) { Text("Reset Learned") }
+                }
+                if (miniAiSamples.isNotEmpty()) {
+                    Spacer(Modifier.height(10.dp))
+                    Text("শেখানো স্যাম্পল (${miniAiSamples.size})", style = MaterialTheme.typography.labelLarge)
+                    Spacer(Modifier.height(4.dp))
+                    miniAiSamples.take(6).forEach { sample ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "• ${sample.inputText.take(48)}",
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                                Text(
+                                    "  -> ${sample.replyText.take(60)} (${sample.hits}x)",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            TextButton(onClick = { onDeleteMiniAiSample(sample.id) }) {
+                                Text("Remove")
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -812,7 +930,9 @@ fun AboutApplicationScreen(
     availableUpdate: com.example.runtime.AppUpdateInfo? = null,
     isCheckingUpdate: Boolean = false,
     onCheckForUpdate: () -> Unit = {},
-    onDownloadInPlaceUpdate: (String) -> Unit = {}
+    onDownloadInPlaceUpdate: (String) -> Unit = {},
+    lastCrashReport: String? = null,
+    onClearCrashReport: () -> Unit = {}
 ) {
     val versionLabel = installedIdentity?.versionName ?: "1.0"
     LazyColumn(
@@ -885,6 +1005,39 @@ fun AboutApplicationScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = EmeraldPulse
                     )
+                }
+            }
+        }
+        item {
+            GlassOsCard(
+                borderColor = if (lastCrashReport.isNullOrBlank()) EmeraldPulse.copy(alpha = 0.45f) else CoralAlert
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Crash Shield & Stability Diagnostic", style = MaterialTheme.typography.titleSmall)
+                    StatusBadge(
+                        label = if (lastCrashReport.isNullOrBlank()) "Healthy" else "Crash Captured",
+                        color = if (lastCrashReport.isNullOrBlank()) EmeraldPulse else CoralAlert
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    if (lastCrashReport.isNullOrBlank()) {
+                        "ব্যাকগ্রাউন্ড Accessibility স্ক্যানার (Facebook Reels সহ হেভি স্ক্রল অ্যাপ), সার্ভিস এবং WebView এখন সম্পূর্ণ সেফটি গার্ডে সুরক্ষিত। কোনো সাম্প্রতিক ক্র্যাশ পাওয়া যায়নি।"
+                    } else {
+                        lastCrashReport.take(900)
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (!lastCrashReport.isNullOrBlank()) {
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(onClick = onClearCrashReport) {
+                        Text("Clear Crash Report")
+                    }
                 }
             }
         }

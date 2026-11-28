@@ -21,7 +21,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 data class HumanInterventionRequest(
-    val id: Long = System.nanoTime(),
+    val id: Long = com.example.runtime.MonotonicIdGenerator.nextId(),
     val challengeType: String,
     val reason: String,
     val targetMode: String, // "BROWSER" or "VIRTUAL_HANDS"
@@ -60,7 +60,8 @@ class ToolRegistry(
     private val repository: AgentRepository,
     private val skillManager: UniversalSkillManager,
     private val botEngine: ZeroLatencyBotEngine? = null,
-    private val whatsAppBotEngine: com.example.whatsapp.WhatsAppBotEngine? = null
+    private val whatsAppBotEngine: com.example.whatsapp.WhatsAppBotEngine? = null,
+    private val workScheduler: com.example.scheduler.AgentWorkScheduler? = null
 ) {
 
     fun getDeclarations(): List<ToolDeclaration> = listOf(
@@ -472,6 +473,28 @@ class ToolRegistry(
                 ),
                 required = listOf("chat_name")
             )
+        ),
+        ToolDeclaration(
+            name = "wa_schedule_message",
+            description = "Schedule a WhatsApp message or multi-day sequential campaign (1 to 30 days) for an exact date (YYYY-MM-DD) & time (HH:mm) to a contact, group, or phone number.",
+            parametersSchema = schema(
+                props = mapOf(
+                    "chat_name" to prop("string", "Contact name, group name, or phone number (+8801...)"),
+                    "message" to prop("string", "Message or AI prompt template (can use {day} and {total})"),
+                    "is_group" to prop("boolean", "True if group"),
+                    "date" to prop("string", "Start date in YYYY-MM-DD format (optional, defaults to today)"),
+                    "time" to prop("string", "24h time in HH:mm format, e.g. '09:30' or '20:00'"),
+                    "days" to prop("integer", "Number of consecutive days (1 to 30, e.g. 10 for a 10-day sequence)"),
+                    "daily_messages" to prop("string", "Optional JSON array or newline-separated list of specific messages/tasks for Day 1..N"),
+                    "compose_with_ai" to prop("boolean", "If true, AI writes a fresh natural message each day from the prompt")
+                ),
+                required = listOf("chat_name", "message", "time")
+            )
+        ),
+        ToolDeclaration(
+            name = "wa_list_schedules",
+            description = "List all pending and recent scheduled WhatsApp messages and multi-day campaigns.",
+            parametersSchema = schema(props = emptyMap(), required = emptyList())
         )
     )
 
@@ -577,7 +600,7 @@ class ToolRegistry(
         ).any { lower.contains(it) }
         if (wantsScheduleOrMedia) {
             matchedDomainCount++
-            coreNames.addAll(listOf("schedule_automation", "youtube_prepare_package"))
+            coreNames.addAll(listOf("schedule_automation", "youtube_prepare_package", "wa_schedule_message", "wa_list_schedules"))
         }
 
         val wantsWhatsApp = listOf(
@@ -587,7 +610,7 @@ class ToolRegistry(
         ).any { lower.contains(it) }
         if (wantsWhatsApp) {
             matchedDomainCount++
-            coreNames.addAll(listOf("wa_list_chats", "wa_read_chat", "wa_send_message", "wa_configure_chat"))
+            coreNames.addAll(listOf("wa_list_chats", "wa_read_chat", "wa_send_message", "wa_configure_chat", "wa_schedule_message", "wa_list_schedules"))
         }
 
         // If prompt is ambiguous or doesn't explicitly narrow to 1-2 domains, keep full toolset
@@ -957,7 +980,9 @@ class ToolRegistry(
                     minuteOfHour = args.optInt("minute", 0)
                 )
                 val id = repository.saveAutomationRule(rule)
-                ToolExecutionOutcome(toolName, true, "Saved automation rule #$id (${rule.title} • ${rule.scheduleType})")
+                val saved = repository.getAutomationRule(id) ?: rule.copy(id = id)
+                workScheduler?.scheduleRule(saved)
+                ToolExecutionOutcome(toolName, true, "Saved & armed WorkManager schedule #$id (${rule.title} • ${rule.scheduleType})")
             }
             "youtube_prepare_package" -> {
                 val slug = args.optString("slug", "video_project").replace(Regex("[^a-zA-Z0-9_-]"), "_")
@@ -1231,6 +1256,62 @@ class ToolRegistry(
                 )
                 val summary = "Updated '${updated.displayName}' (${if (updated.isGroup) "Group" else "DM"}): autoReply=${updated.autoReplyEnabled}, antiLink=${updated.antiLinkEnabled}, antiSticker=${updated.antiStickerEnabled}, antiForward=${updated.antiForwardEnabled}"
                 ToolExecutionOutcome(toolName, true, summary, verified = true)
+            }
+            "wa_schedule_message" -> {
+                val target = args.optString("chat_name").trim()
+                val msg = args.optString("message").trim()
+                if (target.isBlank() || msg.isBlank()) {
+                    return ToolExecutionOutcome(toolName, false, "chat_name and message are required.")
+                }
+                val isGroup = args.optBoolean("is_group", false)
+                val useAi = args.optBoolean("compose_with_ai", false)
+                val days = args.optInt("days", 1).coerceIn(1, 30)
+                val calNow = java.util.Calendar.getInstance()
+                val dateStr = args.optString("date", "").trim()
+                val dateParts = dateStr.split("-").mapNotNull { it.trim().toIntOrNull() }
+                val year = dateParts.getOrNull(0) ?: calNow.get(java.util.Calendar.YEAR)
+                val month = dateParts.getOrNull(1) ?: (calNow.get(java.util.Calendar.MONTH) + 1)
+                val day = dateParts.getOrNull(2) ?: calNow.get(java.util.Calendar.DAY_OF_MONTH)
+                val timeParts = args.optString("time", "09:00").trim().split(":").mapNotNull { it.trim().toIntOrNull() }
+                val hour = timeParts.getOrNull(0)?.coerceIn(0, 23) ?: 9
+                val minute = timeParts.getOrNull(1)?.coerceIn(0, 59) ?: 0
+                val rawDaily = args.opt("daily_messages")
+                val dailyList = when (rawDaily) {
+                    is JSONArray -> (0 until rawDaily.length()).map { rawDaily.optString(it) }
+                    is String -> rawDaily.lines().map { it.trim() }.filter { it.isNotEmpty() }
+                    else -> emptyList()
+                }
+                val entities = com.example.scheduler.AgentWorkScheduler.buildMultiDayScheduleEntities(
+                    targetDisplay = target,
+                    isGroup = isGroup,
+                    defaultMessageTemplate = msg,
+                    useAiCompose = useAi,
+                    startYear = year,
+                    startMonth1To12 = month,
+                    startDayOfMonth = day,
+                    hour = hour,
+                    minute = minute,
+                    totalDays = days,
+                    dailyMessages = dailyList
+                )
+                val ids = repository.insertWhatsAppSchedules(entities)
+                ids.forEachIndexed { idx, id ->
+                    workScheduler?.scheduleWhatsAppDispatch(id, entities[idx].scheduledAtMillis)
+                }
+                val out = "Scheduled ${ids.size} WhatsApp message(s) for '$target' starting $year-${"%02d".format(month)}-${"%02d".format(day)} at ${"%02d".format(hour)}:${"%02d".format(minute)} (IDs: ${ids.joinToString(",")})."
+                ToolExecutionOutcome(toolName, true, out, verified = true)
+            }
+            "wa_list_schedules" -> {
+                val pending = repository.getPendingWhatsAppSchedulesSnapshot()
+                val out = if (pending.isEmpty()) {
+                    "No pending scheduled WhatsApp messages."
+                } else {
+                    val fmt = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
+                    "Pending WhatsApp Schedules (${pending.size}):\n" + pending.take(30).joinToString("\n") { s ->
+                        "- #${s.id} [${s.status}] ${s.targetDisplay} | ${fmt.format(java.util.Date(s.scheduledAtMillis))} | Day ${s.dayIndex}/${s.totalDays} | '${s.messageTemplate.take(55)}'"
+                    }
+                }
+                ToolExecutionOutcome(toolName, true, out, verified = true)
             }
             else -> ToolExecutionOutcome(toolName, false, "Unknown tool: $toolName")
         }

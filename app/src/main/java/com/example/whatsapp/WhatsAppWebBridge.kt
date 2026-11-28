@@ -28,9 +28,9 @@ import kotlin.coroutines.resume
 
 /**
  * Persistent Desktop-Mode WhatsApp Web Bridge (`https://web.whatsapp.com`).
- * Keeps one live WebView session across navigation so users link ONCE via QR or 8-digit phone
- * link code inside this app and control WhatsApp chats, groups, anti-link & anti-sticker with
- * sub-50ms DOM MutationObserver hooks — no need to switch into the external WhatsApp app.
+ * Extracts connected Owner phone automatically from WA Web storage, handles direct phone
+ * deep-links (`send?phone=...`) for scheduled/manual sending, and observes both incoming
+ * messages and Owner-typed bot commands cleanly without double firing.
  */
 class WhatsAppWebBridge(
     private val appContext: Context,
@@ -42,6 +42,9 @@ class WhatsAppWebBridge(
 
     private val _pairingCode = MutableStateFlow("")
     val pairingCode: StateFlow<String> = _pairingCode.asStateFlow()
+
+    private val _detectedOwnerPhone = MutableStateFlow("")
+    val detectedOwnerPhone: StateFlow<String> = _detectedOwnerPhone.asStateFlow()
 
     private val _statusDetail = MutableStateFlow("Tap 'Open Link Portal' to pair WhatsApp via QR or 8-digit phone link code.")
     val statusDetail: StateFlow<String> = _statusDetail.asStateFlow()
@@ -61,6 +64,7 @@ class WhatsAppWebBridge(
         fun onIncomingMessage(message: WaIncomingMessage)
         fun onUnreadChatDetected(chatName: String, isGroup: Boolean)
         fun onStatusChanged(status: WaLinkStatus, detail: String)
+        fun onOwnerPhoneDetected(phoneDigits: String) {}
     }
 
     fun setListener(l: BridgeListener) {
@@ -83,8 +87,10 @@ class WhatsAppWebBridge(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
-            CookieManager.getInstance().setAcceptCookie(true)
-            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+            runCatching {
+                CookieManager.getInstance().setAcceptCookie(true)
+                CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+            }
 
             settings.apply {
                 javaScriptEnabled = true
@@ -166,8 +172,11 @@ class WhatsAppWebBridge(
         scope.launch(Dispatchers.Main) {
             observerBootstrapped = false
             _pairingCode.value = ""
-            CookieManager.getInstance().removeAllCookies(null)
-            CookieManager.getInstance().flush()
+            _detectedOwnerPhone.value = ""
+            runCatching {
+                CookieManager.getInstance().removeAllCookies(null)
+                CookieManager.getInstance().flush()
+            }
             val wv = ensureInitialized(loadIfNeeded = false)
             wv.clearCache(true)
             _linkStatus.value = WaLinkStatus.WAITING_PAIRING
@@ -176,10 +185,6 @@ class WhatsAppWebBridge(
         }
     }
 
-    /**
-     * Automates WhatsApp Web's "Link with phone number" flow so the user gets an 8-digit pairing
-     * code inside the app without needing to manually hunt tiny desktop buttons.
-     */
     suspend fun triggerPhoneLinkCode(phoneWithCountryCode: String): Result<String> = withContext(Dispatchers.Main) {
         val wv = ensureInitialized(loadIfNeeded = true)
         val cleanDigits = phoneWithCountryCode.replace(Regex("[^0-9+]"), "").trim()
@@ -187,7 +192,6 @@ class WhatsAppWebBridge(
             return@withContext Result.failure(IllegalArgumentException("Enter full phone number with country code, e.g. +88017XXXXXXXX"))
         }
 
-        // Step 1: Click "Link with phone number" button if on QR screen
         val clickLinkBtnJs = """
             (function() {
                 const btns = Array.from(document.querySelectorAll('button, [role=button], span, a'));
@@ -203,7 +207,6 @@ class WhatsAppWebBridge(
         evalJs(wv, clickLinkBtnJs)
         delay(850)
 
-        // Step 2: Fill phone number & press Next
         val phoneQuoted = JSONObject.quote(cleanDigits)
         val submitPhoneJs = """
             (function() {
@@ -228,7 +231,6 @@ class WhatsAppWebBridge(
             return@withContext Result.failure(IllegalStateException("Phone link form not visible yet. Wait a second on QR screen and retry."))
         }
 
-        // Step 3: Poll briefly for WhatsApp's 8-char link code boxes
         repeat(10) {
             delay(450)
             val readCodeJs = """
@@ -288,12 +290,14 @@ class WhatsAppWebBridge(
         }
 
         val currentActive = _activeChatName.value.trim()
-        if (!currentActive.equals(chatName.trim(), ignoreCase = true)) {
+        val samePhone = WaAccessGuard.looksLikePhoneTarget(chatName) &&
+            WaAccessGuard.phoneMatches(currentActive, chatName)
+        if (!currentActive.equals(chatName.trim(), ignoreCase = true) && !samePhone) {
             val opened = openChatInternal(wv, chatName)
             if (!opened) {
                 return@withContext Result.failure(IllegalStateException("Could not open chat '$chatName' in WhatsApp Web."))
             }
-            delay(280)
+            delay(320)
         }
 
         val msgEsc = JSONObject.quote(message)
@@ -321,7 +325,7 @@ class WhatsAppWebBridge(
                     } else {
                         box.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true}));
                     }
-                }, 80);
+                }, 90);
                 return JSON.stringify({ok:true});
             })();
         """.trimIndent()
@@ -334,10 +338,6 @@ class WhatsAppWebBridge(
         }
     }
 
-    /**
-     * Deletes an offending message (Anti-Link / Anti-Sticker / Anti-Forward) inside the open chat.
-     * Attempts "Delete for everyone" when user is group admin / sender, otherwise "Delete for me".
-     */
     suspend fun deleteOffendingMessage(chatName: String, domMessageId: String, bodyPreview: String): Result<String> =
         withContext(Dispatchers.Main) {
             val wv = webView ?: return@withContext Result.failure(IllegalStateException("WhatsApp Web unavailable"))
@@ -414,7 +414,7 @@ class WhatsAppWebBridge(
         val first = evalJs(wv, directClickJs)?.trim('"').orEmpty()
         if (first == "OPENED_VISIBLE") return true
         if (first == "SEARCHING") {
-            delay(450)
+            delay(480)
             val pickSearchJs = """
                 (function() {
                     const target = $nameEsc.toLowerCase();
@@ -424,7 +424,25 @@ class WhatsAppWebBridge(
                     return 'NOT_FOUND';
                 })();
             """.trimIndent()
-            return evalJs(wv, pickSearchJs)?.trim('"') == "OPENED_SEARCH"
+            if (evalJs(wv, pickSearchJs)?.trim('"') == "OPENED_SEARCH") return true
+        }
+
+        // Direct phone number fallback via https://web.whatsapp.com/send?phone=<digits>
+        val phoneForUrl = WaAccessGuard.formatPhoneForWaUrl(chatName)
+        if (phoneForUrl != null) {
+            observerBootstrapped = false
+            wv.loadUrl("$WA_WEB_URL/send?phone=$phoneForUrl")
+            repeat(18) {
+                delay(400)
+                val ready = evalJs(
+                    wv,
+                    "!!document.querySelector('#main footer [contenteditable=\"true\"], [data-testid=\"conversation-compose-box-input\"]')"
+                )?.trim()
+                if (ready == "true") {
+                    injectObserverScript(wv)
+                    return true
+                }
+            }
         }
         return false
     }
@@ -459,10 +477,23 @@ class WhatsAppWebBridge(
                 if (window.__waAndroidBotInstalled) return;
                 window.__waAndroidBotInstalled = true;
                 const seenMsgKeys = new Set();
+                let lastOwnerPhoneSent = '';
+
+                function detectSelfPhone() {
+                    try {
+                        const raw = localStorage.getItem('last-wid-md') || localStorage.getItem('last-wid') || '';
+                        const clean = raw.replace(/"/g, '').split(':')[0].split('@')[0].replace(/[^0-9]/g, '');
+                        if (clean.length >= 7 && clean !== lastOwnerPhoneSent) {
+                            lastOwnerPhoneSent = clean;
+                            window.AndroidWaBridge.onOwnerPhoneDetected(clean);
+                        }
+                    } catch(e) {}
+                }
 
                 function checkLoginState() {
                     const pane = document.querySelector('#pane-side');
                     if (pane) {
+                        detectSelfPhone();
                         window.AndroidWaBridge.onLinkStatus('LINKED', 'WhatsApp Web Linked & Monitoring Live');
                         window.__waSyncChats();
                         return true;
@@ -499,11 +530,20 @@ class WhatsAppWebBridge(
                     return chats.length;
                 };
 
+                function extractPhoneFromDomId(domId) {
+                    if (!domId) return '';
+                    const m = domId.match(/_(\d{7,15})@(?:c\.us|s\.whatsapp\.net|lid)/i);
+                    return m ? m[1] : '';
+                }
+
                 function scanActiveMessages() {
                     const headerTitle = (document.querySelector('#main header span[title]')?.getAttribute('title') || document.querySelector('#main header span[dir="auto"]')?.innerText || '').trim();
                     if (!headerTitle) return;
                     const isGroup = !!document.querySelector('#main header [data-icon="default-group"]') || !!document.querySelector('#main .message-in [data-testid="author"]');
-                    const msgs = Array.from(document.querySelectorAll('#main .message-in')).slice(-4);
+                    const inMsgs = Array.from(document.querySelectorAll('#main .message-in')).slice(-4);
+                    const outCmdMsgs = Array.from(document.querySelectorAll('#main .message-out')).slice(-2);
+                    const msgs = [...inMsgs, ...outCmdMsgs];
+
                     const contextRows = Array.from(document.querySelectorAll('#main .message-in, #main .message-out')).slice(-10).map(r => {
                         const out = r.classList.contains('message-out');
                         const t = (r.querySelector('.selectable-text')?.innerText || '').replace(/\s+/g, ' ').trim();
@@ -511,24 +551,30 @@ class WhatsAppWebBridge(
                     }).filter(x => x.length > 5);
 
                     msgs.forEach(m => {
+                        const isOut = m.classList.contains('message-out');
                         const rowWrap = m.closest('[data-id]') || m;
                         const domId = rowWrap.getAttribute('data-id') || '';
                         const copyable = m.querySelector('.copyable-text');
                         const prePlain = copyable ? (copyable.getAttribute('data-pre-plain-text') || '') : '';
-                        let sender = headerTitle;
-                        const authorEl = m.querySelector('[data-testid="author"], span[aria-label$=":"]');
-                        if (authorEl) sender = (authorEl.innerText || '').trim();
-                        else if (prePlain.includes('] ')) sender = prePlain.split('] ')[1].replace(/:$/, '').trim() || headerTitle;
+                        let sender = isOut ? 'You' : headerTitle;
+                        if (!isOut) {
+                            const authorEl = m.querySelector('[data-testid="author"], span[aria-label$=":"]');
+                            if (authorEl) sender = (authorEl.innerText || '').trim();
+                            else if (prePlain.includes('] ')) sender = prePlain.split('] ')[1].replace(/:$/, '').trim() || headerTitle;
+                        }
 
                         const isSticker = !!m.querySelector('[data-testid="sticker"], img[alt*="sticker" i], canvas[aria-label*="sticker" i]');
                         const isForwarded = (m.innerText || '').toLowerCase().includes('forwarded');
                         const linkEl = m.querySelector('a[href]');
                         const textNode = m.querySelector('.selectable-text');
                         let body = (textNode ? textNode.innerText : (linkEl ? linkEl.href : '')).trim();
-                        if (!body && isSticker) body = '[Sticker]';
+                        if (!body && isSticker && !isOut) body = '[Sticker]';
                         if (!body) return;
 
-                        const key = headerTitle + '|' + domId + '|' + sender + '|' + body.slice(0, 60);
+                        // Outgoing messages are ONLY forwarded when Owner explicitly types a bot command (.ai, .cmd, .antilink, etc.)
+                        if (isOut && !/^[.!/][a-zA-Z\u0980-\u09FF]/.test(body)) return;
+
+                        const key = headerTitle + '|' + (domId || (isOut ? 'out' : 'in')) + '|' + body.slice(0, 60);
                         if (seenMsgKeys.has(key)) return;
                         seenMsgKeys.add(key);
                         if (seenMsgKeys.size > 400) {
@@ -536,13 +582,14 @@ class WhatsAppWebBridge(
                             seenMsgKeys.delete(first);
                         }
 
-                        // Skip historical backlog on very first attach by priming once
                         if (!window.__waActiveChatPrimed[headerTitle]) return;
 
                         window.AndroidWaBridge.onIncomingDomMessage(JSON.stringify({
                             chatName: headerTitle,
                             senderName: sender,
+                            senderPhone: extractPhoneFromDomId(domId),
                             isGroup: isGroup,
+                            isFromMe: isOut,
                             body: body,
                             hasLink: !!linkEl,
                             isSticker: isSticker,
@@ -581,6 +628,15 @@ class WhatsAppWebBridge(
     }
 
     private inner class JsWaReceiver {
+        @JavascriptInterface
+        fun onOwnerPhoneDetected(phoneDigits: String) {
+            val clean = WaAccessGuard.extractPhoneDigits(phoneDigits)
+            if (clean.length >= 7) {
+                _detectedOwnerPhone.value = clean
+                listener?.onOwnerPhoneDetected(clean)
+            }
+        }
+
         @JavascriptInterface
         fun onLinkStatus(statusStr: String, detail: String) {
             val st = runCatching { WaLinkStatus.valueOf(statusStr) }.getOrDefault(WaLinkStatus.LOADING)
@@ -638,7 +694,8 @@ class WhatsAppWebBridge(
                         hasLink = obj.optBoolean("hasLink", false) || WaModerationDetector.containsLink(body),
                         isSticker = obj.optBoolean("isSticker", false) || WaModerationDetector.looksLikeStickerText(body),
                         isForwarded = obj.optBoolean("isForwarded", false),
-                        isFromMe = false,
+                        isFromMe = obj.optBoolean("isFromMe", false),
+                        senderPhoneHint = obj.optString("senderPhone", ""),
                         domMessageId = obj.optString("domId", ""),
                         sourceChannel = "WA_WEB",
                         recentContextLines = ctx

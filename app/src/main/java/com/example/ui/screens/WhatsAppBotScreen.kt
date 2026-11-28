@@ -1,5 +1,7 @@
 package com.example.ui.screens
 
+import android.app.DatePickerDialog
+import android.app.TimePickerDialog
 import android.widget.FrameLayout
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Arrangement
@@ -19,19 +21,24 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Terminal
@@ -72,6 +79,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.storage.AppSettings
 import com.example.storage.WhatsAppChatEntity
 import com.example.storage.WhatsAppMessageEntity
+import com.example.storage.WhatsAppScheduledMessageEntity
 import com.example.ui.components.GlassOsCard
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.StatusBadge
@@ -84,6 +92,10 @@ import com.example.whatsapp.WaLinkStatus
 import com.example.whatsapp.WaRuntimeState
 import com.example.whatsapp.WhatsAppWebBridge
 import kotlinx.coroutines.flow.Flow
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
+import java.util.Locale
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -96,11 +108,12 @@ fun WhatsAppBotScreen(
     hasAnyApiKey: Boolean,
     chats: List<WhatsAppChatEntity>,
     activityLogs: List<WhatsAppMessageEntity>,
+    schedules: List<WhatsAppScheduledMessageEntity> = emptyList(),
     webBridge: WhatsAppWebBridge,
     observeChatMessages: (String) -> Flow<List<WhatsAppMessageEntity>>,
     onRefreshStatus: () -> Unit,
     onToggleMaster: (Boolean) -> Unit,
-    onSaveGlobalRules: (Boolean, Boolean, Boolean, Boolean, Boolean, String) -> Unit,
+    onSaveGlobalRules: (Boolean, Boolean, Boolean, Boolean, Boolean, String, String?, String?, Boolean?, Boolean?) -> Unit,
     onRequestPhoneLinkCode: (String) -> Unit,
     onSyncChats: () -> Unit,
     onReloadWeb: (Boolean) -> Unit,
@@ -108,8 +121,13 @@ fun WhatsAppBotScreen(
     onSendMessage: (String, Boolean, String, Boolean) -> Unit,
     onUpdateChatRules: (String, Boolean, Boolean?, Boolean?, Boolean?, Boolean?, Boolean?, String?) -> Unit,
     onDeleteChat: (String) -> Unit,
+    onScheduleCampaign: (String, Boolean, String, Boolean, Int, Int, Int, Int, Int, Int, String) -> Unit = { _, _, _, _, _, _, _, _, _, _, _ -> },
+    onRunScheduleNow: (Long) -> Unit = {},
+    onCancelSchedule: (Long) -> Unit = {},
+    onDeleteSchedule: (Long) -> Unit = {},
     onOpenModelSettings: () -> Unit
 ) {
+    val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     LaunchedEffect(Unit) { onRefreshStatus() }
 
@@ -118,6 +136,30 @@ fun WhatsAppBotScreen(
     var targetChatInput by rememberSaveable { mutableStateOf("") }
     var targetIsGroup by rememberSaveable { mutableStateOf(false) }
     var messageInput by rememberSaveable { mutableStateOf("") }
+
+    // Owner Lock & Security state
+    var ownerPhoneDraft by rememberSaveable(settings.waOwnerPhone) {
+        mutableStateOf(settings.waOwnerPhone.ifBlank {
+            waState.detectedOwnerPhone.takeIf { it.isNotBlank() }?.let { "+$it" }.orEmpty()
+        })
+    }
+    var ownerNameDraft by rememberSaveable(settings.waOwnerName) { mutableStateOf(settings.waOwnerName) }
+
+    // Multi-Day WhatsApp Scheduler state
+    val calInit = remember { Calendar.getInstance().apply { add(Calendar.MINUTE, 10) } }
+    var schedYear by rememberSaveable { mutableStateOf(calInit.get(Calendar.YEAR)) }
+    var schedMonth by rememberSaveable { mutableStateOf(calInit.get(Calendar.MONTH) + 1) }
+    var schedDay by rememberSaveable { mutableStateOf(calInit.get(Calendar.DAY_OF_MONTH)) }
+    var schedHour by rememberSaveable { mutableStateOf(calInit.get(Calendar.HOUR_OF_DAY)) }
+    var schedMinute by rememberSaveable { mutableStateOf(calInit.get(Calendar.MINUTE)) }
+    var schedDaysCountText by rememberSaveable { mutableStateOf("1") }
+    var schedTargetInput by rememberSaveable { mutableStateOf("") }
+    var schedIsGroup by rememberSaveable { mutableStateOf(false) }
+    var schedTemplateInput by rememberSaveable { mutableStateOf("") }
+    var schedDailyListInput by rememberSaveable { mutableStateOf("") }
+    var schedUseDailyList by rememberSaveable { mutableStateOf(false) }
+    var schedUseAiCompose by rememberSaveable { mutableStateOf(false) }
+    var showSchedulerCard by rememberSaveable { mutableStateOf(false) }
 
     var chatFilter by rememberSaveable { mutableStateOf("ALL") } // ALL, GROUPS, DM
     var chatSearch by rememberSaveable { mutableStateOf("") }
@@ -224,9 +266,9 @@ fun WhatsAppBotScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    MetricPill("AI Replies", "${waState.repliesSentCount}")
-                    MetricPill("Deleted", "${waState.moderatedCount}")
-                    MetricPill("Commands", "${waState.commandsExecutedCount}")
+                    MetricPill("Replies", "${waState.repliesSentCount}")
+                    MetricPill("Blocked", "${waState.blockedUnauthorizedCount}")
+                    MetricPill("Scheduled", "${waState.scheduledSentCount}")
                     MetricPill("Speed", if (waState.lastLatencyMs > 0) "${waState.lastLatencyMs}ms" else "<1s")
                 }
             }
@@ -397,7 +439,7 @@ fun WhatsAppBotScreen(
                     OutlinedTextField(
                         value = targetChatInput,
                         onValueChange = { targetChatInput = it },
-                        label = { Text("Contact or Group Name") },
+                        label = { Text("Contact, Group, or +8801...") },
                         singleLine = true,
                         modifier = Modifier
                             .weight(1f)
@@ -459,13 +501,287 @@ fun WhatsAppBotScreen(
             }
         }
 
-        // 4. Global Defaults & AI Bot Persona
+        // 3b. Scheduled WhatsApp Messages & Multi-Day Campaign (1-30 Days)
         item {
-            GlassOsCard {
+            val pendingCount = schedules.count { it.status == "PENDING" }
+            GlassOsCard(borderColor = if (pendingCount > 0) EmeraldPulse.copy(alpha = 0.5f) else MaterialTheme.colorScheme.outlineVariant) {
                 SectionHeader(
-                    title = "AI Brain Persona & Global Rules",
-                    subtitle = "ডিফল্ট অটো-রিপ্লাই, গ্রুপ এন্টি-লিংক, এন্টি-স্টিকার ও AI আচরণ",
-                    icon = Icons.Filled.Shield,
+                    title = "Scheduled & Multi-Day Auto Sender ($pendingCount)",
+                    subtitle = "তারিখ ও সময় অনুযায়ী ১ দিন বা একটানা ১০–৩০ দিনের আলাদা কাজ/মেসেজ শিডিউল করুন",
+                    icon = Icons.Filled.Schedule,
+                    trailing = {
+                        TextButton(
+                            onClick = { showSchedulerCard = !showSchedulerCard },
+                            modifier = Modifier.testTag("wa_toggle_scheduler_button")
+                        ) {
+                            Text(if (showSchedulerCard) "Hide" else "Schedule")
+                        }
+                    }
+                )
+
+                AnimatedVisibility(visible = showSchedulerCard || schedules.isNotEmpty()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (showSchedulerCard) {
+                            Spacer(Modifier.height(4.dp))
+                            if (chats.isNotEmpty()) {
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    chats.take(6).forEach { c ->
+                                        FilterChip(
+                                            selected = schedTargetInput.equals(c.displayName, ignoreCase = true),
+                                            onClick = {
+                                                schedTargetInput = c.displayName
+                                                schedIsGroup = c.isGroup
+                                            },
+                                            label = { Text(c.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                                        )
+                                    }
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = schedTargetInput,
+                                    onValueChange = { schedTargetInput = it },
+                                    label = { Text("Target Contact, Group, or +8801...") },
+                                    singleLine = true,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("wa_sched_target_input")
+                                )
+                                FilterChip(
+                                    selected = schedIsGroup,
+                                    onClick = { schedIsGroup = !schedIsGroup },
+                                    label = { Text(if (schedIsGroup) "Group" else "DM") }
+                                )
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedButton(
+                                    onClick = {
+                                        runCatching {
+                                            DatePickerDialog(
+                                                context,
+                                                { _, y, m0, d ->
+                                                    schedYear = y
+                                                    schedMonth = m0 + 1
+                                                    schedDay = d
+                                                },
+                                                schedYear,
+                                                (schedMonth - 1).coerceIn(0, 11),
+                                                schedDay
+                                            ).show()
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("wa_sched_date_button")
+                                ) {
+                                    Icon(Icons.Filled.CalendarMonth, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("$schedYear-${"%02d".format(schedMonth)}-${"%02d".format(schedDay)}")
+                                }
+                                OutlinedButton(
+                                    onClick = {
+                                        runCatching {
+                                            TimePickerDialog(
+                                                context,
+                                                { _, h, min ->
+                                                    schedHour = h
+                                                    schedMinute = min
+                                                },
+                                                schedHour,
+                                                schedMinute,
+                                                true
+                                            ).show()
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("wa_sched_time_button")
+                                ) {
+                                    Icon(Icons.Filled.AccessTime, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("${"%02d".format(schedHour)}:${"%02d".format(schedMinute)}")
+                                }
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                listOf("1" to "1 Day", "7" to "7 Days", "10" to "10 Days").forEach { (dVal, label) ->
+                                    FilterChip(
+                                        selected = schedDaysCountText == dVal,
+                                        onClick = { schedDaysCountText = dVal },
+                                        label = { Text(label) }
+                                    )
+                                }
+                                OutlinedTextField(
+                                    value = schedDaysCountText,
+                                    onValueChange = { v -> schedDaysCountText = v.filter { it.isDigit() }.take(2) },
+                                    label = { Text("Days") },
+                                    singleLine = true,
+                                    modifier = Modifier
+                                        .width(84.dp)
+                                        .testTag("wa_sched_days_input")
+                                )
+                            }
+
+                            SettingSwitchRow("প্রতিদিন আলাদা আলাদা মেসেজ/টাস্ক (লাইন বাই লাইন)", schedUseDailyList) {
+                                schedUseDailyList = it
+                            }
+
+                            if (schedUseDailyList) {
+                                OutlinedTextField(
+                                    value = schedDailyListInput,
+                                    onValueChange = { schedDailyListInput = it },
+                                    label = { Text("Day 1 (Line 1), Day 2 (Line 2) ... Day 10") },
+                                    minLines = 3,
+                                    maxLines = 6,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("wa_sched_daily_list_input")
+                                )
+                            } else {
+                                OutlinedTextField(
+                                    value = schedTemplateInput,
+                                    onValueChange = { schedTemplateInput = it },
+                                    label = { Text("Message or AI Prompt (Day {day}/{total})") },
+                                    minLines = 2,
+                                    maxLines = 4,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("wa_sched_template_input")
+                                )
+                            }
+
+                            SettingSwitchRow("AI দিয়ে প্রতিদিন ন্যাচারাল মেসেজ লিখবে", schedUseAiCompose) {
+                                schedUseAiCompose = it
+                            }
+
+                            val parsedDays = (schedDaysCountText.toIntOrNull() ?: 1).coerceIn(1, 30)
+                            Button(
+                                onClick = {
+                                    onScheduleCampaign(
+                                        schedTargetInput,
+                                        schedIsGroup,
+                                        schedTemplateInput,
+                                        schedUseAiCompose,
+                                        schedYear,
+                                        schedMonth,
+                                        schedDay,
+                                        schedHour,
+                                        schedMinute,
+                                        parsedDays,
+                                        if (schedUseDailyList) schedDailyListInput else ""
+                                    )
+                                    schedTemplateInput = ""
+                                    schedDailyListInput = ""
+                                },
+                                enabled = schedTargetInput.isNotBlank() && (schedTemplateInput.isNotBlank() || schedDailyListInput.isNotBlank()),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("wa_sched_submit_button")
+                            ) {
+                                Icon(Icons.Filled.Schedule, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Save ${parsedDays}-Day Schedule")
+                            }
+                        }
+
+                        if (schedules.isNotEmpty()) {
+                            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                            val dateFmt = remember { SimpleDateFormat("dd MMM HH:mm", Locale.getDefault()) }
+                            schedules.take(15).forEach { item ->
+                                GlassOsCard {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "${item.targetDisplay} • Day ${item.dayIndex}/${item.totalDays}",
+                                                style = MaterialTheme.typography.labelLarge,
+                                                fontWeight = FontWeight.Bold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Text(
+                                                text = "${dateFmt.format(Date(item.scheduledAtMillis))} • ${item.messageTemplate.take(70)}",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            if (item.lastResult.isNotBlank()) {
+                                                Text(
+                                                    text = item.lastResult,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+                                        }
+                                        StatusBadge(
+                                            label = item.status,
+                                            color = when (item.status) {
+                                                "SENT" -> EmeraldPulse
+                                                "FAILED" -> CoralAlert
+                                                "CANCELLED" -> MaterialTheme.colorScheme.onSurfaceVariant
+                                                else -> NeuralCyan
+                                            }
+                                        )
+                                    }
+                                    Spacer(Modifier.height(6.dp))
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.End,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        if (item.status == "PENDING") {
+                                            TextButton(onClick = { onRunScheduleNow(item.id) }) {
+                                                Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(15.dp))
+                                                Spacer(Modifier.width(2.dp))
+                                                Text("Send Now")
+                                            }
+                                            TextButton(onClick = { onCancelSchedule(item.id) }) {
+                                                Text("Cancel")
+                                            }
+                                        }
+                                        IconButton(
+                                            onClick = { onDeleteSchedule(item.id) },
+                                            modifier = Modifier.size(34.dp)
+                                        ) {
+                                            Icon(Icons.Filled.Delete, contentDescription = "Delete schedule", tint = CoralAlert)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Owner Security Shield, Global Defaults & AI Bot Persona
+        item {
+            GlassOsCard(borderColor = if (settings.waOwnerOnlyCommands) NeuralCyan.copy(alpha = 0.45f) else AmberWarning.copy(alpha = 0.5f)) {
+                SectionHeader(
+                    title = "Owner Lock, Whitelist & AI Persona",
+                    subtitle = "অপরিচিত নাম্বার ব্লক, শুধু Owner-এর .ai/.cmd অনুমোদন ও মানবিক রিপ্লাই স্টাইল",
+                    icon = Icons.Filled.Lock,
                     trailing = {
                         TextButton(onClick = { showGlobalSettingsCard = !showGlobalSettingsCard }) {
                             Text(if (showGlobalSettingsCard) "Hide" else "Configure")
@@ -473,9 +789,85 @@ fun WhatsAppBotScreen(
                     }
                 )
 
+                Spacer(Modifier.height(6.dp))
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    StatusBadge(
+                        label = if (settings.waWhitelistOnlyMode) "Whitelist-Only: ON" else "Open Auto-Reply",
+                        color = if (settings.waWhitelistOnlyMode) EmeraldPulse else AmberWarning
+                    )
+                    StatusBadge(
+                        label = if (settings.waOwnerOnlyCommands) "Owner Cmd Lock: ON" else "Shared Cmds",
+                        color = if (settings.waOwnerOnlyCommands) EmeraldPulse else AmberWarning
+                    )
+                    val activeOwner = settings.waOwnerPhone.ifBlank {
+                        waState.detectedOwnerPhone.takeIf { it.isNotBlank() }?.let { "+$it" }.orEmpty()
+                    }
+                    if (activeOwner.isNotBlank()) {
+                        StatusBadge(label = "Owner: $activeOwner", color = NeuralCyan)
+                    }
+                }
+
                 AnimatedVisibility(visible = showGlobalSettingsCard) {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Spacer(Modifier.height(6.dp))
+                        OutlinedTextField(
+                            value = ownerPhoneDraft,
+                            onValueChange = { ownerPhoneDraft = it },
+                            label = { Text("Owner WhatsApp Phone (+8801...)") },
+                            singleLine = true,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("wa_owner_phone_input")
+                        )
+                        OutlinedTextField(
+                            value = ownerNameDraft,
+                            onValueChange = { ownerNameDraft = it },
+                            label = { Text("Owner Display Name (Optional)") },
+                            singleLine = true,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("wa_owner_name_input")
+                        )
+                        SettingSwitchRow(
+                            title = "Strict Whitelist-Only (সিলেক্ট ছাড়া অন্য কোনো নাম্বারে অটো-রিপ্লাই যাবে না)",
+                            checked = settings.waWhitelistOnlyMode,
+                            onCheckedChange = {
+                                onSaveGlobalRules(
+                                    settings.waDefaultAutoReplyDm,
+                                    settings.waDefaultAutoReplyGroup,
+                                    settings.waGlobalAntiLink,
+                                    settings.waGlobalAntiSticker,
+                                    settings.waGlobalAntiForward,
+                                    personaDraft,
+                                    ownerPhoneDraft,
+                                    ownerNameDraft,
+                                    it,
+                                    settings.waOwnerOnlyCommands
+                                )
+                            }
+                        )
+                        SettingSwitchRow(
+                            title = "Owner-Only Bot & AI Commands (.ai / .cmd শুধু আপনার নাম্বার থেকেই চলবে)",
+                            checked = settings.waOwnerOnlyCommands,
+                            onCheckedChange = {
+                                onSaveGlobalRules(
+                                    settings.waDefaultAutoReplyDm,
+                                    settings.waDefaultAutoReplyGroup,
+                                    settings.waGlobalAntiLink,
+                                    settings.waGlobalAntiSticker,
+                                    settings.waGlobalAntiForward,
+                                    personaDraft,
+                                    ownerPhoneDraft,
+                                    ownerNameDraft,
+                                    settings.waWhitelistOnlyMode,
+                                    it
+                                )
+                            }
+                        )
+                        HorizontalDivider()
                         SettingSwitchRow(
                             title = "Auto-Reply Private Chats (DMs) by Default",
                             checked = settings.waDefaultAutoReplyDm,
@@ -486,7 +878,11 @@ fun WhatsAppBotScreen(
                                     settings.waGlobalAntiLink,
                                     settings.waGlobalAntiSticker,
                                     settings.waGlobalAntiForward,
-                                    personaDraft
+                                    personaDraft,
+                                    ownerPhoneDraft,
+                                    ownerNameDraft,
+                                    settings.waWhitelistOnlyMode,
+                                    settings.waOwnerOnlyCommands
                                 )
                             }
                         )
@@ -500,7 +896,11 @@ fun WhatsAppBotScreen(
                                     settings.waGlobalAntiLink,
                                     settings.waGlobalAntiSticker,
                                     settings.waGlobalAntiForward,
-                                    personaDraft
+                                    personaDraft,
+                                    ownerPhoneDraft,
+                                    ownerNameDraft,
+                                    settings.waWhitelistOnlyMode,
+                                    settings.waOwnerOnlyCommands
                                 )
                             }
                         )
@@ -514,7 +914,11 @@ fun WhatsAppBotScreen(
                                     it,
                                     settings.waGlobalAntiSticker,
                                     settings.waGlobalAntiForward,
-                                    personaDraft
+                                    personaDraft,
+                                    ownerPhoneDraft,
+                                    ownerNameDraft,
+                                    settings.waWhitelistOnlyMode,
+                                    settings.waOwnerOnlyCommands
                                 )
                             }
                         )
@@ -528,7 +932,11 @@ fun WhatsAppBotScreen(
                                     settings.waGlobalAntiLink,
                                     it,
                                     settings.waGlobalAntiForward,
-                                    personaDraft
+                                    personaDraft,
+                                    ownerPhoneDraft,
+                                    ownerNameDraft,
+                                    settings.waWhitelistOnlyMode,
+                                    settings.waOwnerOnlyCommands
                                 )
                             }
                         )
@@ -542,7 +950,11 @@ fun WhatsAppBotScreen(
                                     settings.waGlobalAntiLink,
                                     settings.waGlobalAntiSticker,
                                     it,
-                                    personaDraft
+                                    personaDraft,
+                                    ownerPhoneDraft,
+                                    ownerNameDraft,
+                                    settings.waWhitelistOnlyMode,
+                                    settings.waOwnerOnlyCommands
                                 )
                             }
                         )
@@ -562,12 +974,18 @@ fun WhatsAppBotScreen(
                                     settings.waGlobalAntiLink,
                                     settings.waGlobalAntiSticker,
                                     settings.waGlobalAntiForward,
-                                    personaDraft
+                                    personaDraft,
+                                    ownerPhoneDraft,
+                                    ownerNameDraft,
+                                    settings.waWhitelistOnlyMode,
+                                    settings.waOwnerOnlyCommands
                                 )
                             },
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("wa_save_global_rules_button")
                         ) {
-                            Text("Save Bot Persona")
+                            Text("Save Owner Lock & Bot Persona")
                         }
                     }
                 }

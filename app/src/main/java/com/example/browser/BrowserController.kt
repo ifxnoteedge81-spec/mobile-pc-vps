@@ -27,7 +27,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 
 data class BrowserTab(
-    val id: String = "tab_${System.nanoTime()}",
+    val id: String = "tab_${com.example.runtime.MonotonicIdGenerator.nextId()}",
     val title: String = "New Tab",
     val url: String = "https://duckduckgo.com",
     val isLoading: Boolean = false,
@@ -90,7 +90,11 @@ class BrowserController(
     }
 
     fun newTab(url: String = "https://duckduckgo.com"): BrowserTab {
-        val tab = BrowserTab(title = "Loading...", url = normalizeUrlOrSearch(url), navigationSeq = System.nanoTime())
+        val tab = BrowserTab(
+            title = "Loading...",
+            url = normalizeUrlOrSearch(url),
+            navigationSeq = com.example.runtime.MonotonicIdGenerator.nextId()
+        )
         _tabs.update { it + tab }
         _activeTabId.value = tab.id
         _browserActivitySignal.value = System.currentTimeMillis()

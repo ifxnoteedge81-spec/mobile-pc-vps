@@ -151,3 +151,20 @@ data class WhatsAppMessageEntity(
     val latencyMs: Long = 0L,
     val timestamp: Long = System.currentTimeMillis()
 )
+
+@Entity(tableName = "whatsapp_schedules")
+data class WhatsAppScheduledMessageEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val chatKey: String,
+    val targetDisplay: String,
+    val isGroup: Boolean = false,
+    val messageTemplate: String,
+    val useAiCompose: Boolean = false,
+    val scheduledAtMillis: Long,
+    val campaignId: String = "",
+    val dayIndex: Int = 1,
+    val totalDays: Int = 1,
+    val status: String = "PENDING", // PENDING, SENT, FAILED, CANCELLED
+    val lastResult: String = "",
+    val createdAt: Long = System.currentTimeMillis()
+)

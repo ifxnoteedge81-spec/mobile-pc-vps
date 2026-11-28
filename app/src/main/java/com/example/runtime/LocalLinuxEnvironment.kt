@@ -13,7 +13,7 @@ import java.io.File
 import java.util.concurrent.TimeUnit
 
 data class TerminalLine(
-    val id: Long = System.nanoTime(),
+    val id: Long = MonotonicIdGenerator.nextId(),
     val text: String,
     val isCommand: Boolean = false,
     val isError: Boolean = false

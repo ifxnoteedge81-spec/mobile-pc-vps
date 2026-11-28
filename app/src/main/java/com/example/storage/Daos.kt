@@ -180,3 +180,33 @@ interface WhatsAppMessageDao {
     @Query("DELETE FROM whatsapp_messages")
     suspend fun clearAllMessages()
 }
+
+@Dao
+interface WhatsAppScheduleDao {
+    @Query("SELECT * FROM whatsapp_schedules ORDER BY scheduledAtMillis ASC")
+    fun observeAllSchedules(): Flow<List<WhatsAppScheduledMessageEntity>>
+
+    @Query("SELECT * FROM whatsapp_schedules WHERE id = :id LIMIT 1")
+    suspend fun getScheduleById(id: Long): WhatsAppScheduledMessageEntity?
+
+    @Query("SELECT * FROM whatsapp_schedules WHERE status = 'PENDING' AND scheduledAtMillis <= :nowMillis ORDER BY scheduledAtMillis ASC")
+    suspend fun getDuePendingSchedules(nowMillis: Long): List<WhatsAppScheduledMessageEntity>
+
+    @Query("SELECT * FROM whatsapp_schedules WHERE status = 'PENDING' ORDER BY scheduledAtMillis ASC")
+    suspend fun getPendingSchedulesSnapshot(): List<WhatsAppScheduledMessageEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertSchedule(item: WhatsAppScheduledMessageEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertSchedules(items: List<WhatsAppScheduledMessageEntity>): List<Long>
+
+    @Update
+    suspend fun updateSchedule(item: WhatsAppScheduledMessageEntity)
+
+    @Query("DELETE FROM whatsapp_schedules WHERE id = :id")
+    suspend fun deleteSchedule(id: Long)
+
+    @Query("DELETE FROM whatsapp_schedules")
+    suspend fun clearAllSchedules()
+}

@@ -18,7 +18,7 @@ data class AgentSkill(
 )
 
 data class AgentUploadedAttachment(
-    val id: String = "att_${System.nanoTime()}",
+    val id: String = "att_${com.example.runtime.MonotonicIdGenerator.nextId()}",
     val displayName: String,
     val relativePath: String,
     val mimeType: String,
@@ -29,6 +29,13 @@ data class AgentUploadedAttachment(
 
 object AgentSkillRegistry {
     val skills: List<AgentSkill> = listOf(
+        AgentSkill(
+            id = "universal_bangla_prompt",
+            title = "ইউনিভার্সাল বাংলা প্রম্পট (যেকোনো কাজের জন্য)",
+            subtitle = "অ্যাপ কন্ট্রোল, ব্রাউজার সার্চ, Gmail/অ্যাকাউন্ট তৈরি, ফর্ম ফিলাপ ও এপ্লাই",
+            category = SkillCategory.AUTOMATION,
+            promptTemplate = com.example.ai.LocalMiniAiBrain.buildUniversalBanglaPrompt()
+        ),
         AgentSkill(
             id = "cad_floor_plan",
             title = "AutoCAD 2D ফ্লোর প্ল্যান ও ব্লুপ্রিন্ট",

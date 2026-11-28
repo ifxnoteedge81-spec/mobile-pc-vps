@@ -36,7 +36,9 @@ import com.example.storage.PowerProfile
 import com.example.storage.ProviderUsageEntity
 import com.example.storage.WhatsAppChatEntity
 import com.example.storage.WhatsAppMessageEntity
+import com.example.storage.WhatsAppScheduledMessageEntity
 import com.example.ui.theme.ThemeMode
+import com.example.voice.VoiceRuntimeState
 import com.example.whatsapp.WaLinkStatus
 import com.example.whatsapp.WaRuntimeState
 import com.example.whatsapp.WhatsAppNotificationService
@@ -95,9 +97,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val whatsAppActivity: StateFlow<List<WhatsAppMessageEntity>> = container.repository.whatsAppActivity
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val whatsAppSchedules: StateFlow<List<WhatsAppScheduledMessageEntity>> = container.repository.whatsAppSchedules
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val whatsAppState: StateFlow<WaRuntimeState> = container.whatsAppBotEngine.state
     val whatsAppLinkStatus: StateFlow<WaLinkStatus> = container.whatsAppWebBridge.linkStatus
     val whatsAppPairingCode: StateFlow<String> = container.whatsAppWebBridge.pairingCode
+    val voiceState: StateFlow<VoiceRuntimeState> = container.voiceAssistantController.state
+    val miniAiStats: StateFlow<com.example.ai.MiniAiBrainStats> = container.miniAiBrain.stats
+    val miniAiSamples: StateFlow<List<com.example.ai.MiniAiSample>> = container.miniAiBrain.learnedSamplesFlow
+
+    private val _lastCrashReport = MutableStateFlow(
+        com.example.runtime.CrashDiagnosticRecorder.readLastCrash(application)
+    )
+    val lastCrashReport: StateFlow<String?> = _lastCrashReport.asStateFlow()
 
     // File Manager & Code Editor state
     private val _currentBrowsePath = MutableStateFlow("")
@@ -942,7 +954,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         globalAntiLink: Boolean,
         globalAntiSticker: Boolean,
         globalAntiForward: Boolean,
-        persona: String
+        persona: String,
+        ownerPhone: String? = null,
+        ownerName: String? = null,
+        whitelistOnlyMode: Boolean? = null,
+        ownerOnlyCommands: Boolean? = null
     ) {
         viewModelScope.launch {
             container.settingsStore.updateWhatsAppBotConfig(
@@ -951,9 +967,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 globalAntiLink = globalAntiLink,
                 globalAntiSticker = globalAntiSticker,
                 globalAntiForward = globalAntiForward,
+                ownerPhone = ownerPhone,
+                ownerName = ownerName,
+                whitelistOnlyMode = whitelistOnlyMode,
+                ownerOnlyCommands = ownerOnlyCommands,
                 persona = persona
             )
-            showBanner("WhatsApp Bot গ্লোবাল সেটিংস ও AI পার্সোনা সেভ হয়েছে।")
+            showBanner("WhatsApp Bot সিকিউরিটি, Owner Lock ও AI পার্সোনা সেভ হয়েছে।")
         }
     }
 
@@ -1042,4 +1062,161 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun observeWhatsAppChatMessages(chatKey: String) =
         container.whatsAppBotEngine.observeMessagesForChat(chatKey)
+
+    fun scheduleWhatsAppCampaign(
+        targetChatName: String,
+        isGroup: Boolean,
+        messageTemplate: String,
+        useAiCompose: Boolean,
+        year: Int,
+        month1To12: Int,
+        dayOfMonth: Int,
+        hour: Int,
+        minute: Int,
+        totalDays: Int,
+        dailyMessagesRaw: String = ""
+    ) {
+        if (targetChatName.isBlank() || (messageTemplate.isBlank() && dailyMessagesRaw.isBlank())) {
+            showBanner("টার্গেট কন্ট্যাক্ট/নাম্বার এবং মেসেজ লিখুন।")
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val dailyList = dailyMessagesRaw.lines().map { it.trim() }.filter { it.isNotEmpty() }
+            val entities = com.example.scheduler.AgentWorkScheduler.buildMultiDayScheduleEntities(
+                targetDisplay = targetChatName.trim(),
+                isGroup = isGroup,
+                defaultMessageTemplate = messageTemplate.trim().ifBlank { dailyList.first() },
+                useAiCompose = useAiCompose,
+                startYear = year,
+                startMonth1To12 = month1To12,
+                startDayOfMonth = dayOfMonth,
+                hour = hour,
+                minute = minute,
+                totalDays = totalDays,
+                dailyMessages = dailyList
+            )
+            val ids = container.repository.insertWhatsAppSchedules(entities)
+            ids.forEachIndexed { idx, id ->
+                container.workScheduler.scheduleWhatsAppDispatch(id, entities[idx].scheduledAtMillis)
+            }
+            showBanner("${ids.size} দিনের WhatsApp শিডিউল সেট হয়েছে (${targetChatName.trim()} • ${"%02d".format(hour)}:${"%02d".format(minute)})।")
+        }
+    }
+
+    fun runWhatsAppScheduleNow(scheduleId: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            container.workScheduler.runWhatsAppScheduleNow(scheduleId)
+            showBanner("শিডিউল #$scheduleId এখনই পাঠানো হচ্ছে...")
+        }
+    }
+
+    fun cancelWhatsAppSchedule(scheduleId: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            container.workScheduler.cancelWhatsAppDispatch(scheduleId)
+            container.repository.getWhatsAppScheduleById(scheduleId)?.let { item ->
+                container.repository.updateWhatsAppSchedule(
+                    item.copy(status = "CANCELLED", lastResult = "Cancelled by Owner")
+                )
+            }
+            showBanner("শিডিউল #$scheduleId বাতিল করা হয়েছে।")
+        }
+    }
+
+    fun deleteWhatsAppSchedule(scheduleId: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            container.workScheduler.cancelWhatsAppDispatch(scheduleId)
+            container.repository.deleteWhatsAppSchedule(scheduleId)
+        }
+    }
+
+    // Voice Training, Voiceprint Lock & Hands-Free Assistant
+    fun enrollOwnerVoiceSample() {
+        viewModelScope.launch(Dispatchers.IO) {
+            container.voiceAssistantController.enrollOwnerSample().fold(
+                onSuccess = { count -> showBanner("ভয়েস স্যাম্পল #$count সেভ হয়েছে!") },
+                onFailure = { err -> showBanner(err.message ?: "ভয়েস এনরোল ব্যর্থ") }
+            )
+        }
+    }
+
+    fun testOwnerVoiceMatch() {
+        viewModelScope.launch(Dispatchers.IO) {
+            container.voiceAssistantController.testOwnerMatch().fold(
+                onSuccess = { (pct, ok) ->
+                    showBanner(if (ok) "✅ Voice Match $pct% (Owner Verified)" else "🚫 Voice Rejected ($pct%)")
+                },
+                onFailure = { err -> showBanner(err.message ?: "ভয়েস ম্যাচ টেস্ট ব্যর্থ") }
+            )
+        }
+    }
+
+    fun clearOwnerVoice() {
+        viewModelScope.launch(Dispatchers.IO) {
+            container.voiceAssistantController.clearVoiceProfile()
+            showBanner("ভয়েস প্রোফাইল রিসেট করা হয়েছে।")
+        }
+    }
+
+    fun toggleVoiceHandsFree(enabled: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            container.voiceAssistantController.setHandsFreeMonitoring(enabled).fold(
+                onSuccess = { active ->
+                    showBanner(if (active) "হ্যান্ডস-ফ্রি ভয়েস কন্ট্রোল চালু হয়েছে!" else "হ্যান্ডস-ফ্রি ভয়েস কন্ট্রোল বন্ধ আছে।")
+                },
+                onFailure = { err -> showBanner(err.message ?: "মাইক্রোফোন পারমিশন দিন।") }
+            )
+        }
+    }
+
+    fun updateVoicePreferences(
+        voiceLockEnabled: Boolean? = null,
+        threshold: Float? = null,
+        spokenFeedbackEnabled: Boolean? = null
+    ) {
+        viewModelScope.launch {
+            container.settingsStore.updateVoiceConfig(
+                voiceLockEnabled = voiceLockEnabled,
+                matchThreshold = threshold,
+                spokenFeedbackEnabled = spokenFeedbackEnabled
+            )
+        }
+    }
+
+    // On-Device Self-Learning Mini AI & Crash Shield controls
+    fun updateMiniAiPrefs(enabled: Boolean? = null, threshold: Float? = null) {
+        viewModelScope.launch {
+            container.settingsStore.updateMiniAiConfig(enabled = enabled, confidenceThreshold = threshold)
+        }
+    }
+
+    fun trainMiniAi(inputText: String, replyText: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            container.miniAiBrain.teachCustomPair(inputText, replyText).fold(
+                onSuccess = {
+                    showBanner("Mini AI নতুন উত্তর শিখেছে (0 Tokens মোডের জন্য সংরক্ষিত)!")
+                },
+                onFailure = { err ->
+                    showBanner(err.message ?: "প্রশ্ন ও উত্তর দুটিই লিখুন।")
+                }
+            )
+        }
+    }
+
+    fun deleteMiniAiSample(sampleId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            container.miniAiBrain.deleteSample(sampleId)
+        }
+    }
+
+    fun resetMiniAiKnowledge() {
+        viewModelScope.launch(Dispatchers.IO) {
+            container.miniAiBrain.resetLearnedKnowledge()
+            showBanner("Mini AI-এর শেখানো মেমরি রিসেট হয়েছে (স্টার্টার বাংলা/ইংরেজি প্রিসেট অক্ষত)।")
+        }
+    }
+
+    fun clearLastCrashReport() {
+        com.example.runtime.CrashDiagnosticRecorder.clearLastCrash(getApplication())
+        _lastCrashReport.value = null
+    }
 }

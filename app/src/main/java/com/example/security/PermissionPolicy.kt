@@ -70,7 +70,7 @@ object CommandSecurityGuard {
         val lower = packageName.lowercase()
         val protectedHints = listOf(
             "bank", "bkash", "nagad", "rocket", "paypal", "wallet",
-            "authenticator", "keepass", "1password", "bitwarden", "keyguard",
+            "authenticator", "keepass", "1password", "onepassword", "bitwarden", "keyguard",
             "packageinstaller"
         )
         return protectedHints.any { lower.contains(it) }

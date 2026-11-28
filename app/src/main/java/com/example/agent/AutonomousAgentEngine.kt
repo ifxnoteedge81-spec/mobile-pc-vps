@@ -34,7 +34,7 @@ enum class FeedEntryKind {
 }
 
 data class CommandFeedItem(
-    val id: Long = System.nanoTime(),
+    val id: Long = com.example.runtime.MonotonicIdGenerator.nextId(),
     val kind: FeedEntryKind,
     val title: String,
     val body: String,
@@ -67,6 +67,7 @@ class AutonomousAgentEngine(
     private val skillManager: UniversalSkillManager,
     private val settingsFlow: kotlinx.coroutines.flow.Flow<AppSettings>,
     private val botEngine: ZeroLatencyBotEngine? = null,
+    private val miniAiBrain: com.example.ai.LocalMiniAiBrain? = null,
     private val onInterventionAlert: (HumanInterventionRequest) -> Unit = {}
 ) {
     private val _state = MutableStateFlow(AgentRuntimeState())
@@ -93,6 +94,23 @@ class AutonomousAgentEngine(
         val job = launchCommandJob(userPrompt, attachments) ?: return false
         job.join()
         return _state.value.taskStatus == TaskStatus.COMPLETED
+    }
+
+    suspend fun executeCommandAndWaitWithReport(
+        userPrompt: String,
+        attachments: List<AgentUploadedAttachment> = emptyList()
+    ): Pair<Boolean, String> {
+        val job = launchCommandJob(userPrompt, attachments) ?: return false to "Empty command."
+        job.join()
+        val taskId = _state.value.activeTaskId
+        val taskReport = if (taskId != null) {
+            repository.getTask(taskId)?.finalReport.orEmpty()
+        } else ""
+        val fallbackFeed = _state.value.feed.lastOrNull {
+            it.kind == FeedEntryKind.AI_REASONING || it.kind == FeedEntryKind.VERIFIED_TOOL_RESULT || it.kind == FeedEntryKind.ERROR_NOTICE
+        }?.body.orEmpty()
+        val finalMsg = taskReport.ifBlank { fallbackFeed }.ifBlank { "কাজটি সম্পন্ন হয়েছে।" }
+        return (_state.value.taskStatus == TaskStatus.COMPLETED) to finalMsg
     }
 
     private fun launchCommandJob(
@@ -216,6 +234,18 @@ class AutonomousAgentEngine(
         userPrompt: String,
         attachments: List<AgentUploadedAttachment>
     ) {
+        com.example.accessibility.PersonalAiAccessibilityService.isAgentBusyFlag = true
+        try {
+            runAgentCycleInternal(userPrompt, attachments)
+        } finally {
+            com.example.accessibility.PersonalAiAccessibilityService.isAgentBusyFlag = false
+        }
+    }
+
+    private suspend fun runAgentCycleInternal(
+        userPrompt: String,
+        attachments: List<AgentUploadedAttachment>
+    ) {
         val settings = settingsFlow.first()
         val resources = resourceManager.refresh(settings)
         val modelLabel = router.getActiveLabel(settings)
@@ -274,12 +304,12 @@ class AutonomousAgentEngine(
         val botResult = botEngine?.tryInstantOrPrewarm(userPrompt.trim(), attachments, settings.fullAutonomousMode)
         if (botResult != null) {
             repository.appendLog(taskId, 0, "TOOL_RESULT", "${botResult.botName} (0ms)", botResult.summary, verified = true)
-            appendFeed(
-                kind = FeedEntryKind.VERIFIED_TOOL_RESULT,
-                title = "⚡ ${botResult.botName}",
-                body = botResult.summary
-            )
             if (botResult.handledCompletely) {
+                appendFeed(
+                    kind = FeedEntryKind.VERIFIED_TOOL_RESULT,
+                    title = "⚡ ${botResult.botName}",
+                    body = botResult.summary
+                )
                 sessionTurns.add(AiMessage(role = "user", content = displayUserText.take(800)))
                 sessionTurns.add(AiMessage(role = "assistant", content = botResult.summary))
                 while (sessionTurns.size > 12) sessionTurns.removeAt(0)
@@ -302,6 +332,11 @@ class AutonomousAgentEngine(
                     )
                 }
                 return
+            } else {
+                // Coordinated pre-warm stays silent in chat feed so User gets ONE clean unified AI response
+                _state.update {
+                    it.copy(currentPhaseLabel = "⚡ ${botResult.botName} synced • Preparing final response...")
+                }
             }
         }
 
@@ -313,6 +348,53 @@ class AutonomousAgentEngine(
 
         // Sub-5-second fast path for simple greetings & short conversational questions
         if (isFastChat && botResult == null) {
+            if (settings.miniAiEnabled && miniAiBrain != null) {
+                val miniHit = miniAiBrain.inferReply(
+                    query = userPrompt.trim(),
+                    minConfidence = settings.miniAiTokenSaverConfidence,
+                    channel = "AGENT"
+                )
+                if (miniHit != null) {
+                    val sourceLabel = "Mini AI On-Device (${miniHit.sourceCategory} • 0 Tokens)"
+                    repository.appendLog(
+                        taskId,
+                        1,
+                        "AI_RESPONSE",
+                        sourceLabel,
+                        miniHit.reply,
+                        verified = true
+                    )
+                    appendFeed(
+                        FeedEntryKind.AI_REASONING,
+                        "Mini AI Local Brain (0 Tokens • ${miniHit.latencyMs}ms)",
+                        miniHit.reply
+                    )
+                    sessionTurns.add(AiMessage(role = "user", content = displayUserText))
+                    sessionTurns.add(AiMessage(role = "assistant", content = miniHit.reply.take(1500)))
+                    while (sessionTurns.size > 12) sessionTurns.removeAt(0)
+                    repository.getTask(taskId)?.let {
+                        repository.updateTask(
+                            it.copy(
+                                status = TaskStatus.COMPLETED,
+                                finalReport = miniHit.reply,
+                                modelUsed = sourceLabel,
+                                tokensUsed = 0
+                            )
+                        )
+                    }
+                    _state.update {
+                        it.copy(
+                            isBusy = false,
+                            taskStatus = TaskStatus.COMPLETED,
+                            activeModelLabel = "Mini AI Brain (0 Tokens)",
+                            currentPhaseLabel = "Completed in ${miniHit.latencyMs}ms (0 Tokens • ~${miniHit.estimatedTokensSaved} saved)",
+                            streamingBuffer = ""
+                        )
+                    }
+                    return
+                }
+            }
+
             val fastPrompt = "You are Personal AI Computer, a helpful, ultra-fast autonomous AI computer assistant. Reply naturally, concisely, and warmly in the user's language (Bangla or English)."
             val conversation = mutableListOf<AiMessage>().apply {
                 addAll(sessionTurns.takeLast(4))
@@ -333,6 +415,9 @@ class AutonomousAgentEngine(
                 val completion = fastRes.getOrThrow()
                 val tokens = completion.promptTokens + completion.completionTokens
                 val reply = completion.text.ifBlank { "হ্যালো! বলো, আজ কীভাবে সাহায্য করতে পারি?" }
+                if (settings.miniAiEnabled) {
+                    miniAiBrain?.learnFromCloudTurn(userPrompt.trim(), reply, channel = "AGENT")
+                }
                 val slotTag = completion.keySlotLabel?.let { "$it • " }.orEmpty()
                 repository.appendLog(taskId, 1, "AI_RESPONSE", "Fast Reply", reply, verified = true)
                 appendFeed(FeedEntryKind.AI_REASONING, "AI (${completion.provider} • $slotTag${completion.model})", reply)
@@ -681,6 +766,9 @@ class AutonomousAgentEngine(
                     key = "Task #$taskId: ${displayUserText.take(45)}",
                     content = "Command: ${displayUserText.take(180)} | Outcome: ${finalText.take(260)}"
                 )
+            }
+            if (settings.miniAiEnabled && totalTokens > 0 && finalText.isNotBlank()) {
+                miniAiBrain?.learnFromCloudTurn(userPrompt.trim(), finalText, channel = "AGENT")
             }
 
             _state.update {
