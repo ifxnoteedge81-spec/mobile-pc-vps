@@ -73,8 +73,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val browserActivitySignal: StateFlow<Long> = container.browserController.browserActivitySignal
 
     val accessibilityConnected: StateFlow<Boolean> = container.deviceController.accessibilityConnected
+    val accessibilityHealth: StateFlow<com.example.accessibility.AccessibilityHealthState> =
+        container.deviceController.accessibilityHealth
     val activeWindowPackage: StateFlow<String> = container.deviceController.activePackage
     val liveAccessibilityNodes: StateFlow<List<ObservedUiNode>> = container.deviceController.liveNodes
+    val daemonRunning: StateFlow<Boolean> = AgentForegroundService.isRunning
+    val waNotificationBound: StateFlow<Boolean> = WhatsAppNotificationService.isConnected
+    private val _batteryUnrestricted = MutableStateFlow(
+        AgentForegroundService.isIgnoringBatteryOptimizations(application)
+    )
+    val batteryUnrestricted: StateFlow<Boolean> = _batteryUnrestricted.asStateFlow()
     val networkEvents: StateFlow<List<NetworkEvent>> = container.auditLogger.events
 
     val tasks: StateFlow<List<AgentTaskEntity>> = container.repository.tasks
@@ -186,8 +194,63 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
         }
+        refreshSystemRuntimeHealth()
         refreshFiles()
         checkForAppUpdate(silent = true)
+    }
+
+    fun refreshSystemRuntimeHealth() {
+        val app = getApplication<Application>()
+        container.deviceController.refreshAccessibilityStatus()
+        WhatsAppNotificationService.requestRebindIfNeeded(app)
+        container.whatsAppBotEngine.refreshNotificationStatus()
+        _batteryUnrestricted.value = AgentForegroundService.isIgnoringBatteryOptimizations(app)
+        val cur = settings.value
+        if (cur.backgroundKeepAliveEnabled || cur.waBotEnabled) {
+            AgentForegroundService.startOrRefresh(
+                app,
+                if (cur.waBotEnabled) "24/7 Active • WhatsApp AI Bot & Virtual Hands Ready"
+                else "24/7 Background Engine Active • Virtual Hands Ready"
+            )
+            container.workScheduler.ensureKeepAliveWatchdogScheduled()
+        }
+        if (cur.waBotEnabled) {
+            viewModelScope.launch(Dispatchers.Main) {
+                container.whatsAppWebBridge.ensureInitialized(loadIfNeeded = true)
+                container.whatsAppWebBridge.pulseKeepAlive()
+            }
+        }
+    }
+
+    fun toggleBackgroundKeepAlive(enabled: Boolean) {
+        viewModelScope.launch {
+            container.settingsStore.updateBackgroundKeepAlive(enabled)
+            val app = getApplication<Application>()
+            if (enabled) {
+                container.workScheduler.ensureKeepAliveWatchdogScheduled()
+                AgentForegroundService.startOrRefresh(app, "24/7 Background Engine Active • Ready")
+                showBanner("24/7 ব্যাকগ্রাউন্ড ইঞ্জিন চালু হয়েছে।")
+            } else if (!settings.value.waBotEnabled) {
+                AgentForegroundService.stopDaemon(app)
+                showBanner("ব্যাকগ্রাউন্ড Always-On ইঞ্জিন বন্ধ করা হয়েছে।")
+            } else {
+                showBanner("WhatsApp Bot চালু থাকায় ব্যাকগ্রাউন্ড ইঞ্জিন সচল থাকবে।")
+            }
+        }
+    }
+
+    fun openBatteryUnrestrictedSettings() {
+        AgentForegroundService.openBatteryOptimizationSettings(getApplication()).fold(
+            onSuccess = { showBanner(it) },
+            onFailure = { showBanner(it.message ?: "Unable to open Battery Settings") }
+        )
+    }
+
+    fun openOwnAppInfoRestrictedSettings() {
+        AgentForegroundService.openAppInfoSettings(getApplication()).fold(
+            onSuccess = { showBanner(it) },
+            onFailure = { showBanner(it.message ?: "Unable to open App Info") }
+        )
     }
 
     fun checkForAppUpdate(silent: Boolean = false) {
@@ -944,7 +1007,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun toggleWhatsAppBotMaster(enabled: Boolean) {
         viewModelScope.launch {
             container.settingsStore.updateWhatsAppBotConfig(enabled = enabled)
-            showBanner(if (enabled) "WhatsApp AI Bot চালু হয়েছে।" else "WhatsApp AI Bot বন্ধ করা হয়েছে।")
+            val app = getApplication<Application>()
+            if (enabled) {
+                AgentForegroundService.startOrRefresh(app, "24/7 Active • WhatsApp AI Bot Running")
+                container.workScheduler.ensureKeepAliveWatchdogScheduled()
+                WhatsAppNotificationService.requestRebindIfNeeded(app)
+                container.whatsAppBotEngine.refreshNotificationStatus()
+                withContext(Dispatchers.Main) {
+                    container.whatsAppWebBridge.ensureInitialized(loadIfNeeded = true)
+                    container.whatsAppWebBridge.pulseKeepAlive()
+                }
+                showBanner("WhatsApp AI Bot ও 24/7 ব্যাকগ্রাউন্ড ইঞ্জিন চালু হয়েছে।")
+            } else {
+                showBanner("WhatsApp AI Bot বন্ধ করা হয়েছে।")
+            }
         }
     }
 

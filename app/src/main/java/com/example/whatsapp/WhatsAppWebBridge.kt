@@ -132,6 +132,8 @@ class WhatsAppWebBridge(
         }
 
         webView = wv
+        wv.onResume()
+        wv.resumeTimers()
         if (loadIfNeeded) {
             _linkStatus.value = WaLinkStatus.LOADING
             _statusDetail.value = "Connecting to WhatsApp Web Linked Devices..."
@@ -143,6 +145,7 @@ class WhatsAppWebBridge(
     fun attachToContainer(container: FrameLayout) {
         val wv = ensureInitialized(loadIfNeeded = true)
         wv.onResume()
+        wv.resumeTimers()
         val oldParent = wv.parent as? ViewGroup
         if (oldParent === container) return
         oldParent?.removeView(wv)
@@ -155,6 +158,30 @@ class WhatsAppWebBridge(
         if (attachedContainer === container) {
             container.removeAllViews()
             attachedContainer = null
+        }
+        // Explicitly keep JS timers & WebSocket active in background while detached from UI
+        runCatching {
+            webView?.onResume()
+            webView?.resumeTimers()
+        }
+    }
+
+    fun pulseKeepAlive() {
+        val wv = webView ?: return
+        runCatching {
+            wv.onResume()
+            wv.resumeTimers()
+            if (wv.url.isNullOrBlank()) {
+                _linkStatus.value = WaLinkStatus.LOADING
+                wv.loadUrl(WA_WEB_URL)
+                return
+            }
+            wv.evaluateJavascript("(function(){ return !!window.__waAndroidBotInstalled; })();") { raw ->
+                if (raw?.trim() != "true") {
+                    observerBootstrapped = false
+                    injectObserverScript(wv)
+                }
+            }
         }
     }
 

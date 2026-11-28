@@ -125,7 +125,11 @@ fun WhatsAppBotScreen(
     onRunScheduleNow: (Long) -> Unit = {},
     onCancelSchedule: (Long) -> Unit = {},
     onDeleteSchedule: (Long) -> Unit = {},
-    onOpenModelSettings: () -> Unit
+    onOpenModelSettings: () -> Unit,
+    waNotificationBound: Boolean = waState.notificationAccessGranted,
+    batteryUnrestricted: Boolean = false,
+    onOpenAppInfoSettings: () -> Unit = {},
+    onOpenBatterySettings: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
@@ -245,8 +249,20 @@ fun WhatsAppBotScreen(
                     }
                     StatusBadge(label = linkStatus.label, color = linkColor)
                     StatusBadge(
-                        label = if (waState.notificationAccessGranted) "BG Auto-Reply: ON" else "BG Listener: Off",
-                        color = if (waState.notificationAccessGranted) EmeraldPulse else AmberWarning
+                        label = when {
+                            waNotificationBound -> "BG Listener: Active"
+                            waState.notificationAccessGranted -> "BG Listener: Rebinding"
+                            else -> "BG Listener: Off"
+                        },
+                        color = when {
+                            waNotificationBound -> EmeraldPulse
+                            waState.notificationAccessGranted -> AmberWarning
+                            else -> CoralAlert
+                        }
+                    )
+                    StatusBadge(
+                        label = if (batteryUnrestricted) "Battery: Unrestricted" else "Battery: Optimize Risk",
+                        color = if (batteryUnrestricted) EmeraldPulse else AmberWarning
                     )
                     StatusBadge(
                         label = if (hasAnyApiKey) activeModelLabel.take(30) else "Add API Key",
@@ -369,14 +385,22 @@ fun WhatsAppBotScreen(
                     OutlinedButton(onClick = { onReloadWeb(true) }) {
                         Text("New QR")
                     }
-                    if (!waState.notificationAccessGranted) {
+                    if (!waNotificationBound) {
                         Button(
                             onClick = onOpenNotificationSettings,
                             colors = ButtonDefaults.buttonColors(containerColor = EmeraldPulse)
                         ) {
                             Icon(Icons.Filled.NotificationsActive, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(4.dp))
-                            Text("Enable BG Auto-Reply")
+                            Text(if (waState.notificationAccessGranted) "Re-toggle BG Listener" else "Enable BG Auto-Reply")
+                        }
+                        OutlinedButton(onClick = onOpenAppInfoSettings) {
+                            Text("Restricted Settings (⋮)")
+                        }
+                    }
+                    if (!batteryUnrestricted) {
+                        OutlinedButton(onClick = onOpenBatterySettings) {
+                            Text("Allow 24/7 Battery")
                         }
                     }
                 }

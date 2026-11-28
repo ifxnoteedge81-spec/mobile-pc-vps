@@ -31,14 +31,38 @@ data class StagedGalleryMedia(
 class DeviceAutomationController(private val context: Context) {
 
     val accessibilityConnected: StateFlow<Boolean> = PersonalAiAccessibilityService.isConnected
+    val accessibilityHealth: StateFlow<AccessibilityHealthState> = PersonalAiAccessibilityService.healthState
     val activePackage: StateFlow<String> = PersonalAiAccessibilityService.activePackage
     val liveNodes: StateFlow<List<ObservedUiNode>> = PersonalAiAccessibilityService.liveNodes
+
+    fun refreshAccessibilityStatus(): AccessibilityHealthState {
+        return PersonalAiAccessibilityService.refreshHealthState(context)
+    }
+
+    private fun requireVirtualHandsService(): Result<PersonalAiAccessibilityService> {
+        val svc = PersonalAiAccessibilityService.instance
+        if (svc != null) return Result.success(svc)
+        val health = refreshAccessibilityStatus()
+        val msg = when (health) {
+            AccessibilityHealthState.ENABLED_BUT_UNBOUND ->
+                "Virtual Hands সেটিংসে চালু আছে, কিন্তু Android/ফোন সার্ভিসটি আনবাইন্ড করেছে। Accessibility Settings-এ গিয়ে 'AI Computer Virtual Hands' একবার OFF করে আবার ON করুন।"
+            AccessibilityHealthState.DISABLED ->
+                "Virtual Hands বন্ধ আছে। Accessibility Settings থেকে 'AI Computer Virtual Hands' চালু করুন (গ্রে বা লক থাকলে App Info -> ⋮ -> Allow restricted settings দিন)।"
+            AccessibilityHealthState.CONNECTED ->
+                "Accessibility Service temporarily unavailable"
+        }
+        return Result.failure(IllegalStateException(msg))
+    }
 
     fun openAccessibilitySettings() {
         val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         context.startActivity(intent)
+    }
+
+    fun openOwnAppInfoSettings() {
+        openAppDetailsSettings(context.packageName)
     }
 
     fun getScreenSizeLabel(): String {
@@ -52,49 +76,42 @@ class DeviceAutomationController(private val context: Context) {
     }
 
     fun inspectScreen(): Result<List<ObservedUiNode>> {
-        val svc = PersonalAiAccessibilityService.instance
-            ?: return Result.failure(IllegalStateException("Accessibility Service is disabled. Enable 'AI Computer Virtual Hands' in Android Settings."))
+        val svc = requireVirtualHandsService().getOrElse { return Result.failure(it) }
         return svc.inspectActiveWindowNodes()
     }
 
     fun tap(x: Float, y: Float): Result<String> {
-        val svc = PersonalAiAccessibilityService.instance
-            ?: return Result.failure(IllegalStateException("Accessibility Service not enabled"))
+        val svc = requireVirtualHandsService().getOrElse { return Result.failure(it) }
         return if (svc.performTap(x, y)) Result.success("Tapped ($x, $y)")
         else Result.failure(IllegalStateException("Tap blocked or failed"))
     }
 
     fun doubleTap(x: Float, y: Float): Result<String> {
-        val svc = PersonalAiAccessibilityService.instance
-            ?: return Result.failure(IllegalStateException("Accessibility Service not enabled"))
+        val svc = requireVirtualHandsService().getOrElse { return Result.failure(it) }
         return if (svc.performDoubleTap(x, y)) Result.success("Double-tapped ($x, $y)")
         else Result.failure(IllegalStateException("Double tap blocked or failed"))
     }
 
     fun longPress(x: Float, y: Float): Result<String> {
-        val svc = PersonalAiAccessibilityService.instance
-            ?: return Result.failure(IllegalStateException("Accessibility Service not enabled"))
+        val svc = requireVirtualHandsService().getOrElse { return Result.failure(it) }
         return if (svc.performLongPress(x, y)) Result.success("Long-pressed ($x, $y)")
         else Result.failure(IllegalStateException("Long press blocked or failed"))
     }
 
     fun swipe(x1: Float, y1: Float, x2: Float, y2: Float): Result<String> {
-        val svc = PersonalAiAccessibilityService.instance
-            ?: return Result.failure(IllegalStateException("Accessibility Service not enabled"))
+        val svc = requireVirtualHandsService().getOrElse { return Result.failure(it) }
         return if (svc.performSwipe(x1, y1, x2, y2)) Result.success("Swiped ($x1,$y1)->($x2,$y2)")
         else Result.failure(IllegalStateException("Swipe blocked or failed"))
     }
 
     fun scroll(direction: String): Result<String> {
-        val svc = PersonalAiAccessibilityService.instance
-            ?: return Result.failure(IllegalStateException("Accessibility Service not enabled"))
+        val svc = requireVirtualHandsService().getOrElse { return Result.failure(it) }
         return if (svc.performDirectionalScroll(direction)) Result.success("Scrolled screen $direction")
         else Result.failure(IllegalStateException("Scroll blocked or failed"))
     }
 
     suspend fun scrollToText(query: String, maxScrolls: Int = 5): Result<String> {
-        val svc = PersonalAiAccessibilityService.instance
-            ?: return Result.failure(IllegalStateException("Accessibility Service not enabled"))
+        val svc = requireVirtualHandsService().getOrElse { return Result.failure(it) }
         val q = query.trim().lowercase()
         repeat(maxScrolls.coerceIn(1, 8)) { attempt ->
             val nodes = svc.inspectActiveWindowNodes().getOrElse { emptyList() }
@@ -113,30 +130,26 @@ class DeviceAutomationController(private val context: Context) {
     }
 
     fun clickText(text: String): Result<String> {
-        val svc = PersonalAiAccessibilityService.instance
-            ?: return Result.failure(IllegalStateException("Accessibility Service not enabled"))
+        val svc = requireVirtualHandsService().getOrElse { return Result.failure(it) }
         return if (svc.clickNodeByText(text)) Result.success("Clicked UI node '$text'")
         else Result.failure(IllegalStateException("No clickable node matching '$text'"))
     }
 
     fun typeIntoField(query: String, text: String): Result<String> {
-        val svc = PersonalAiAccessibilityService.instance
-            ?: return Result.failure(IllegalStateException("Accessibility Service not enabled"))
+        val svc = requireVirtualHandsService().getOrElse { return Result.failure(it) }
         val ok = if (query.isBlank()) svc.setTextInFocusedNode(text) else svc.setTextByQuery(query, text)
         return if (ok) Result.success("Entered text into '${query.ifBlank { "focused field" }}'")
         else Result.failure(IllegalStateException("No editable node matching '$query'"))
     }
 
     fun pressEnter(): Result<String> {
-        val svc = PersonalAiAccessibilityService.instance
-            ?: return Result.failure(IllegalStateException("Accessibility Service not enabled"))
+        val svc = requireVirtualHandsService().getOrElse { return Result.failure(it) }
         return if (svc.performImeEnter()) Result.success("Submitted / pressed Enter")
         else Result.failure(IllegalStateException("Could not trigger Enter/Submit on current screen"))
     }
 
     fun globalNav(action: String): Result<String> {
-        val svc = PersonalAiAccessibilityService.instance
-            ?: return Result.failure(IllegalStateException("Accessibility Service not enabled"))
+        val svc = requireVirtualHandsService().getOrElse { return Result.failure(it) }
         val ok = when (action.lowercase()) {
             "back" -> svc.performSystemBack()
             "home" -> svc.performSystemHome()

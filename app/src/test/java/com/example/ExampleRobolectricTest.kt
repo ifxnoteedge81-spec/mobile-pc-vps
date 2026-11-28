@@ -194,6 +194,22 @@ class ExampleRobolectricTest {
     )
     assert(info.isUpdateAvailable)
     assertEquals(9570500L, info.latestVersionCode)
+    val main9Info = com.example.runtime.AppUpdateChecker.parseVersionJson(
+      rawJson = """
+        {
+          "version": "main-9",
+          "versionCode": 9571610,
+          "releaseDownloadUrl": "https://github.com/ifxnoteedge81-spec/mobile-pc-vps/releases/latest/download/personal-ai-computer.apk",
+          "sha256": "abc123",
+          "sizeBytes": 24000000,
+          "changelog": ["24/7 keep-alive", "Virtual Hands visibility fix"]
+        }
+      """.trimIndent(),
+      installedVersionCode = 9571587L,
+      installedVersionName = "1.0.main-8"
+    )
+    assert(main9Info.isUpdateAvailable)
+    assertEquals(9571610L, main9Info.latestVersionCode)
     assertEquals(1, com.example.storage.AppDatabase.MIGRATION_1_2.startVersion)
     assertEquals(2, com.example.storage.AppDatabase.MIGRATION_1_2.endVersion)
   }

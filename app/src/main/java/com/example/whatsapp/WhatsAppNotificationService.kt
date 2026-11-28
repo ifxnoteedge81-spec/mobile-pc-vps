@@ -36,6 +36,10 @@ class WhatsAppNotificationService : NotificationListenerService() {
             _isConnected.value = true
             val app = application as? PersonalAiApplication
             app?.container?.whatsAppBotEngine?.refreshNotificationStatus()
+            com.example.scheduler.AgentForegroundService.startOrRefresh(
+                this,
+                "WhatsApp AI Bot Background Listener Active"
+            )
         }
     }
 
@@ -185,6 +189,8 @@ class WhatsAppNotificationService : NotificationListenerService() {
             return ignoredFragments.any { lower.contains(it) }
         }
 
+        fun isBound(): Boolean = _isConnected.value
+
         fun isPermissionEnabled(context: Context): Boolean {
             if (_isConnected.value) return true
             return runCatching {
@@ -195,6 +201,16 @@ class WhatsAppNotificationService : NotificationListenerService() {
                 val flat = ComponentName(context, WhatsAppNotificationService::class.java).flattenToString()
                 enabled.contains(flat) || enabled.contains(WhatsAppNotificationService::class.java.simpleName)
             }.getOrDefault(false)
+        }
+
+        fun requestRebindIfNeeded(context: Context) {
+            if (_isConnected.value) return
+            if (!isPermissionEnabled(context)) return
+            runCatching {
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                    requestRebind(ComponentName(context, WhatsAppNotificationService::class.java))
+                }
+            }
         }
 
         fun openNotificationListenerSettings(context: Context): Result<String> {

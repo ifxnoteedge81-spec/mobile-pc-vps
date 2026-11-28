@@ -139,6 +139,9 @@ fun CommandCenterScreen(
     activeTabId: String,
     browserActivitySignal: Long,
     accessibilityConnected: Boolean,
+    accessibilityHealth: com.example.accessibility.AccessibilityHealthState =
+        if (accessibilityConnected) com.example.accessibility.AccessibilityHealthState.CONNECTED
+        else com.example.accessibility.AccessibilityHealthState.DISABLED,
     activeWindowPackage: String,
     liveNodes: List<ObservedUiNode>,
     voiceState: VoiceRuntimeState = VoiceRuntimeState(),
@@ -166,6 +169,7 @@ fun CommandCenterScreen(
     onResolvePermission: (Boolean) -> Unit,
     onResolveIntervention: (String) -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
+    onOpenAppInfoSettings: () -> Unit = {},
     onOpenExternalApp: (String?) -> Unit,
     onInspectDeviceScreen: () -> Unit,
     onQuickVirtualHand: (String) -> Unit,
@@ -409,7 +413,13 @@ fun CommandCenterScreen(
                         AssistChip(
                             onClick = onOpenAccessibilitySettings,
                             leadingIcon = { Icon(Icons.Filled.TouchApp, contentDescription = null, modifier = Modifier.size(16.dp), tint = AmberWarning) },
-                            label = { Text("Virtual Hands চালু করুন") },
+                            label = {
+                                Text(
+                                    if (accessibilityHealth == com.example.accessibility.AccessibilityHealthState.ENABLED_BUT_UNBOUND)
+                                        "Virtual Hands রিসেট করুন (Off→On)"
+                                    else "Virtual Hands চালু করুন"
+                                )
+                            },
                             modifier = Modifier.testTag("enable_virtual_hands_chip")
                         )
                     }
@@ -478,6 +488,7 @@ fun CommandCenterScreen(
                 browserTabs = browserTabs,
                 activeTabId = activeTabId,
                 accessibilityConnected = accessibilityConnected,
+                accessibilityHealth = accessibilityHealth,
                 activeWindowPackage = activeWindowPackage,
                 liveNodes = liveNodes,
                 interventionNote = interventionNote,
@@ -485,6 +496,7 @@ fun CommandCenterScreen(
                 onResolveIntervention = { onResolveIntervention(interventionNote) },
                 onStopAgent = onStop,
                 onOpenAccessibilitySettings = onOpenAccessibilitySettings,
+                onOpenAppInfoSettings = onOpenAppInfoSettings,
                 onOpenExternalApp = onOpenExternalApp,
                 onInspectScreen = onInspectDeviceScreen,
                 onQuickVirtualHand = onQuickVirtualHand
@@ -1216,6 +1228,9 @@ private fun LiveScreenAgentPanel(
     browserTabs: List<BrowserTab>,
     activeTabId: String,
     accessibilityConnected: Boolean,
+    accessibilityHealth: com.example.accessibility.AccessibilityHealthState =
+        if (accessibilityConnected) com.example.accessibility.AccessibilityHealthState.CONNECTED
+        else com.example.accessibility.AccessibilityHealthState.DISABLED,
     activeWindowPackage: String,
     liveNodes: List<ObservedUiNode>,
     interventionNote: String,
@@ -1223,6 +1238,7 @@ private fun LiveScreenAgentPanel(
     onResolveIntervention: () -> Unit,
     onStopAgent: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
+    onOpenAppInfoSettings: () -> Unit = {},
     onOpenExternalApp: (String?) -> Unit,
     onInspectScreen: () -> Unit,
     onQuickVirtualHand: (String) -> Unit
@@ -1417,14 +1433,27 @@ private fun LiveScreenAgentPanel(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = if (accessibilityConnected) "Virtual Hands Active • App: $activeWindowPackage" else "Virtual Hands Disabled",
+                        text = when {
+                            accessibilityConnected -> "Virtual Hands Active • App: $activeWindowPackage"
+                            accessibilityHealth == com.example.accessibility.AccessibilityHealthState.ENABLED_BUT_UNBOUND ->
+                                "Virtual Hands Unbound — Settings-এ OFF→ON করুন"
+                            else -> "Virtual Hands Disabled (App Info ⋮ → Allow restricted settings)"
+                        },
                         style = MaterialTheme.typography.labelMedium,
                         color = if (accessibilityConnected) EmeraldPulse else CoralAlert
                     )
                 }
                 if (!accessibilityConnected) {
-                    OutlinedButton(onClick = onOpenAccessibilitySettings) {
-                        Text("Enable")
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        OutlinedButton(onClick = onOpenAccessibilitySettings) {
+                            Text(
+                                if (accessibilityHealth == com.example.accessibility.AccessibilityHealthState.ENABLED_BUT_UNBOUND)
+                                    "Re-toggle" else "Enable"
+                            )
+                        }
+                        OutlinedButton(onClick = onOpenAppInfoSettings) {
+                            Text("App Info")
+                        }
                     }
                 } else {
                     OutlinedButton(onClick = { onOpenExternalApp(intervention?.urlOrPackage ?: activeWindowPackage) }) {

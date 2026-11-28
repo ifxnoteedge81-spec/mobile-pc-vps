@@ -786,8 +786,19 @@ fun ResourceManagerScreen(
 @Composable
 fun PermissionsAndSecurityScreen(
     accessibilityConnected: Boolean,
+    accessibilityHealth: com.example.accessibility.AccessibilityHealthState =
+        if (accessibilityConnected) com.example.accessibility.AccessibilityHealthState.CONNECTED
+        else com.example.accessibility.AccessibilityHealthState.DISABLED,
+    backgroundKeepAliveEnabled: Boolean = true,
+    daemonRunning: Boolean = false,
+    batteryUnrestricted: Boolean = false,
+    waNotificationBound: Boolean = false,
     networkEvents: List<NetworkEvent>,
     onOpenAccessibilitySettings: () -> Unit,
+    onToggleBackgroundKeepAlive: (Boolean) -> Unit = {},
+    onOpenBatterySettings: () -> Unit = {},
+    onOpenAppInfoSettings: () -> Unit = {},
+    onOpenNotificationSettings: () -> Unit = {},
     onClearAllData: () -> Unit
 ) {
     val context = LocalContext.current
@@ -818,15 +829,61 @@ fun PermissionsAndSecurityScreen(
         }
 
         item {
+            GlassOsCard(borderColor = if (daemonRunning && batteryUnrestricted) EmeraldPulse.copy(alpha = 0.55f) else AmberWarning.copy(alpha = 0.65f)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("24/7 Background Engine & OEM Shield", style = MaterialTheme.typography.titleSmall)
+                    StatusBadge(
+                        label = if (daemonRunning) "DAEMON ACTIVE" else "IDLE",
+                        color = if (daemonRunning) EmeraldPulse else AmberWarning
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+                SwitchRow("Always-On Background Keep-Alive", backgroundKeepAliveEnabled, onToggleBackgroundKeepAlive)
+                Spacer(Modifier.height(6.dp))
+                PermissionActionRow(
+                    title = "Battery Optimization (Unrestricted)",
+                    status = if (batteryUnrestricted) "Unrestricted (Safe from Killing)" else "Optimized (Phone may kill in background)",
+                    isOk = batteryUnrestricted,
+                    actionLabel = "Battery",
+                    onAction = onOpenBatterySettings
+                )
+                Spacer(Modifier.height(8.dp))
+                PermissionActionRow(
+                    title = "Android 13–15 Restricted Settings Unlock",
+                    status = "যদি Accessibility বা Notification সুইচ গ্রে/লক থাকে, App Info → উপরের ডানে ⋮ → Allow restricted settings দিন",
+                    isOk = accessibilityConnected && waNotificationBound,
+                    actionLabel = "App Info",
+                    onAction = onOpenAppInfoSettings
+                )
+            }
+        }
+
+        item {
             GlassOsCard {
                 Text("System Permissions", style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.height(8.dp))
                 PermissionActionRow(
                     title = "Accessibility Virtual Hands",
-                    status = if (accessibilityConnected) "Enabled" else "Disabled",
+                    status = when (accessibilityHealth) {
+                        com.example.accessibility.AccessibilityHealthState.CONNECTED -> "Connected & Live"
+                        com.example.accessibility.AccessibilityHealthState.ENABLED_BUT_UNBOUND -> "Enabled in Settings but Unbound — toggle OFF then ON"
+                        com.example.accessibility.AccessibilityHealthState.DISABLED -> "Disabled"
+                    },
                     isOk = accessibilityConnected,
                     actionLabel = "Settings",
                     onAction = onOpenAccessibilitySettings
+                )
+                Spacer(Modifier.height(8.dp))
+                PermissionActionRow(
+                    title = "WhatsApp Notification Listener",
+                    status = if (waNotificationBound) "Bound & Listening" else "Unbound / Disabled",
+                    isOk = waNotificationBound,
+                    actionLabel = "Open",
+                    onAction = onOpenNotificationSettings
                 )
                 Spacer(Modifier.height(8.dp))
                 PermissionActionRow(
@@ -964,7 +1021,7 @@ fun AboutApplicationScreen(
                 }
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "নতুন ভার্সন ইনস্টল করলে আগের অ্যাপটি আনইনস্টল করার কোনো প্রয়োজন নেই — আপনার সব API Key, মেমরি, স্কিল ও ফাইল সম্পূর্ণ অক্ষত রেখেই স্বয়ংক্রিয়ভাবে ইন-প্লেস আপডেট হবে।",
+                    "একই সাইনিং কী দিয়ে তৈরি প্রতিটি নতুন ভার্সন আগের অ্যাপের ওপর আনইনস্টল ছাড়াই ১০০% ইন-প্লেস আপডেট হবে — সব API Key, মেমরি, স্কিল ও ফাইল অক্ষত থাকবে। (কেবল ভিন্ন সাইনিং কী-এর পুরোনো বিল্ড থেকে প্রথমবার সুইচ করলে একবার আনইনস্টল লাগে; ইনস্টলের পর Restricted Settings ও Battery Unrestricted চেক করুন।)",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

@@ -40,6 +40,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -48,6 +49,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
@@ -93,8 +97,12 @@ fun PersonalAiApp(
     val browserActivitySignal by viewModel.browserActivitySignal.collectAsStateWithLifecycle()
     val bookmarks by viewModel.bookmarks.collectAsStateWithLifecycle()
     val accessibilityConnected by viewModel.accessibilityConnected.collectAsStateWithLifecycle()
+    val accessibilityHealth by viewModel.accessibilityHealth.collectAsStateWithLifecycle()
     val activeWindowPkg by viewModel.activeWindowPackage.collectAsStateWithLifecycle()
     val liveAccessibilityNodes by viewModel.liveAccessibilityNodes.collectAsStateWithLifecycle()
+    val daemonRunning by viewModel.daemonRunning.collectAsStateWithLifecycle()
+    val waNotificationBound by viewModel.waNotificationBound.collectAsStateWithLifecycle()
+    val batteryUnrestricted by viewModel.batteryUnrestricted.collectAsStateWithLifecycle()
     val observedNodes by viewModel.observedNodes.collectAsStateWithLifecycle()
     val installedApps by viewModel.installedApps.collectAsStateWithLifecycle()
     val files by viewModel.files.collectAsStateWithLifecycle()
@@ -137,6 +145,17 @@ fun PersonalAiApp(
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.refreshSystemRuntimeHealth()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     LaunchedEffect(statusBanner) {
         statusBanner?.let {
@@ -330,6 +349,7 @@ fun PersonalAiApp(
                                     activeTabId = activeTabId,
                                     browserActivitySignal = browserActivitySignal,
                                     accessibilityConnected = accessibilityConnected,
+                                    accessibilityHealth = accessibilityHealth,
                                     activeWindowPackage = activeWindowPkg,
                                     liveNodes = liveAccessibilityNodes.ifEmpty { observedNodes },
                                     voiceState = voiceState,
@@ -357,6 +377,7 @@ fun PersonalAiApp(
                                     onResolvePermission = viewModel::resolveAgentPermission,
                                     onResolveIntervention = viewModel::resolveHumanIntervention,
                                     onOpenAccessibilitySettings = { viewModel.deviceController.openAccessibilitySettings() },
+                                    onOpenAppInfoSettings = viewModel::openOwnAppInfoRestrictedSettings,
                                     onOpenExternalApp = viewModel::openActiveOrTargetApp,
                                     onInspectDeviceScreen = viewModel::inspectDeviceScreen,
                                     onQuickVirtualHand = { act -> viewModel.testVirtualHandGesture(act) },
@@ -393,7 +414,11 @@ fun PersonalAiApp(
                                     onRunScheduleNow = viewModel::runWhatsAppScheduleNow,
                                     onCancelSchedule = viewModel::cancelWhatsAppSchedule,
                                     onDeleteSchedule = viewModel::deleteWhatsAppSchedule,
-                                    onOpenModelSettings = { navigateTo(AppDestination.AiModelSettings) }
+                                    onOpenModelSettings = { navigateTo(AppDestination.AiModelSettings) },
+                                    waNotificationBound = waNotificationBound,
+                                    batteryUnrestricted = batteryUnrestricted,
+                                    onOpenAppInfoSettings = viewModel::openOwnAppInfoRestrictedSettings,
+                                    onOpenBatterySettings = viewModel::openBatteryUnrestrictedSettings
                                 )
                             }
                             composable(AppDestination.VirtualDesktop.route) {
@@ -404,9 +429,11 @@ fun PersonalAiApp(
                                     terminalLines = terminalLines,
                                     workspaceFiles = files,
                                     accessibilityConnected = accessibilityConnected,
+                                    accessibilityHealth = accessibilityHealth,
                                     activeWindowPackage = activeWindowPkg,
                                     observedNodes = observedNodes,
                                     onOpenAccessibilitySettings = { viewModel.deviceController.openAccessibilitySettings() },
+                                    onOpenAppInfoSettings = viewModel::openOwnAppInfoRestrictedSettings,
                                     onInspectScreen = viewModel::inspectDeviceScreen,
                                     onTestGesture = { viewModel.testVirtualHandGesture(it) },
                                     onNavigate = ::navigateTo
@@ -537,8 +564,17 @@ fun PersonalAiApp(
                             composable(AppDestination.PermissionsSecurity.route) {
                                 PermissionsAndSecurityScreen(
                                     accessibilityConnected = accessibilityConnected,
+                                    accessibilityHealth = accessibilityHealth,
+                                    backgroundKeepAliveEnabled = settings.backgroundKeepAliveEnabled,
+                                    daemonRunning = daemonRunning,
+                                    batteryUnrestricted = batteryUnrestricted,
+                                    waNotificationBound = waNotificationBound,
                                     networkEvents = networkEvents,
                                     onOpenAccessibilitySettings = { viewModel.deviceController.openAccessibilitySettings() },
+                                    onToggleBackgroundKeepAlive = viewModel::toggleBackgroundKeepAlive,
+                                    onOpenBatterySettings = viewModel::openBatteryUnrestrictedSettings,
+                                    onOpenAppInfoSettings = viewModel::openOwnAppInfoRestrictedSettings,
+                                    onOpenNotificationSettings = viewModel::openWhatsAppNotificationSettings,
                                     onClearAllData = viewModel::clearAllLocalData
                                 )
                             }

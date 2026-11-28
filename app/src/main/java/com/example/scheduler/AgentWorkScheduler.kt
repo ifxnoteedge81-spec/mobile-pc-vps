@@ -116,6 +116,31 @@ class AgentWorkScheduler(private val context: Context) {
         }
     }
 
+    fun ensureKeepAliveWatchdogScheduled() {
+        runCatching {
+            val req = PeriodicWorkRequestBuilder<KeepAliveWatchdogWorker>(15, TimeUnit.MINUTES)
+                .build()
+            workManager.enqueueUniquePeriodicWork(
+                UNIQUE_KEEP_ALIVE_WATCHDOG,
+                ExistingPeriodicWorkPolicy.KEEP,
+                req
+            )
+        }
+    }
+
+    fun triggerImmediateKeepAliveSync(delaySeconds: Long = 2L) {
+        runCatching {
+            val req = OneTimeWorkRequestBuilder<KeepAliveWatchdogWorker>()
+                .setInitialDelay(delaySeconds.coerceIn(1L, 30L), TimeUnit.SECONDS)
+                .build()
+            workManager.enqueueUniqueWork(
+                UNIQUE_KEEP_ALIVE_REVIVE,
+                ExistingWorkPolicy.REPLACE,
+                req
+            )
+        }
+    }
+
     private fun computeInitialDelayMillis(hour: Int, minute: Int): Long {
         val now = Calendar.getInstance()
         val target = Calendar.getInstance().apply {
@@ -131,6 +156,9 @@ class AgentWorkScheduler(private val context: Context) {
     }
 
     companion object {
+        const val UNIQUE_KEEP_ALIVE_WATCHDOG = "ai_keep_alive_watchdog_15m"
+        const val UNIQUE_KEEP_ALIVE_REVIVE = "ai_keep_alive_revive_once"
+
         fun computeTargetTimestampMillis(
             year: Int,
             month1To12: Int,

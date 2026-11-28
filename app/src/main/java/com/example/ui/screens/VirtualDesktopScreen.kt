@@ -57,9 +57,13 @@ fun VirtualDesktopScreen(
     terminalLines: List<TerminalLine>,
     workspaceFiles: List<WorkspaceFileItem>,
     accessibilityConnected: Boolean,
+    accessibilityHealth: com.example.accessibility.AccessibilityHealthState =
+        if (accessibilityConnected) com.example.accessibility.AccessibilityHealthState.CONNECTED
+        else com.example.accessibility.AccessibilityHealthState.DISABLED,
     activeWindowPackage: String,
     observedNodes: List<ObservedUiNode>,
     onOpenAccessibilitySettings: () -> Unit,
+    onOpenAppInfoSettings: () -> Unit = {},
     onInspectScreen: () -> Unit,
     onTestGesture: (String) -> Unit,
     onNavigate: (AppDestination) -> Unit
@@ -191,23 +195,39 @@ fun VirtualDesktopScreen(
                         Text("Virtual Hands (Controller B)", style = MaterialTheme.typography.titleSmall)
                     }
                     StatusBadge(
-                        label = if (accessibilityConnected) "ENABLED" else "DISABLED",
+                        label = accessibilityHealth.label,
                         color = if (accessibilityConnected) EmeraldPulse else AmberWarning
                     )
                 }
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    text = "Active Window: $activeWindowPackage\nProtected banking, OTP, password, and biometric screens are automatically blocked.",
+                    text = when (accessibilityHealth) {
+                        com.example.accessibility.AccessibilityHealthState.CONNECTED ->
+                            "Active Window: $activeWindowPackage\nProtected banking, OTP, password, and biometric screens are automatically blocked."
+                        com.example.accessibility.AccessibilityHealthState.ENABLED_BUT_UNBOUND ->
+                            "Accessibility সেটিংসে চালু থাকলেও Android/OEM সার্ভিসটি সাময়িক বন্ধ রেখেছে। Settings-এ গিয়ে 'AI Computer Virtual Hands' একবার OFF করে আবার ON করুন।"
+                        com.example.accessibility.AccessibilityHealthState.DISABLED ->
+                            "Virtual Hands বন্ধ আছে। Settings থেকে চালু করুন (অপশন লক/গ্রে থাকলে App Info → উপরের ডানে ⋮ → Allow restricted settings দিন)।"
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(Modifier.height(10.dp))
                 if (!accessibilityConnected) {
-                    Button(
-                        onClick = onOpenAccessibilitySettings,
-                        modifier = Modifier.testTag("enable_accessibility_button")
-                    ) {
-                        Text("Enable AI Computer Virtual Hands")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = onOpenAccessibilitySettings,
+                            modifier = Modifier.testTag("enable_accessibility_button")
+                        ) {
+                            Text(
+                                if (accessibilityHealth == com.example.accessibility.AccessibilityHealthState.ENABLED_BUT_UNBOUND)
+                                    "Re-toggle Virtual Hands"
+                                else "Enable Virtual Hands"
+                            )
+                        }
+                        OutlinedButton(onClick = onOpenAppInfoSettings) {
+                            Text("Restricted Settings")
+                        }
                     }
                 } else {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

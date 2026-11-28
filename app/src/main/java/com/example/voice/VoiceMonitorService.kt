@@ -57,7 +57,12 @@ class VoiceMonitorService : Service() {
             val app = application as? PersonalAiApplication
             app?.container?.voiceAssistantController?.onForegroundServiceStarted()
         }
-        return START_NOT_STICKY
+        return START_STICKY
+    }
+
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+        runCatching { stopSelf() }
     }
 
     private fun buildNotification(): Notification {

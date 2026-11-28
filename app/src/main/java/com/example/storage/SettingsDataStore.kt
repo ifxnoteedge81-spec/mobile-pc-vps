@@ -61,7 +61,8 @@ data class AppSettings(
     val voiceHandsFreeEnabled: Boolean = false,
     val voiceSpokenFeedbackEnabled: Boolean = true,
     val miniAiEnabled: Boolean = true,
-    val miniAiTokenSaverConfidence: Float = 0.78f
+    val miniAiTokenSaverConfidence: Float = 0.78f,
+    val backgroundKeepAliveEnabled: Boolean = true
 )
 
 class SettingsDataStore(private val context: Context) {
@@ -102,6 +103,7 @@ class SettingsDataStore(private val context: Context) {
         val VOICE_SPOKEN_FEEDBACK = booleanPreferencesKey("voice_spoken_feedback")
         val MINI_AI_ENABLED = booleanPreferencesKey("mini_ai_enabled")
         val MINI_AI_CONFIDENCE = floatPreferencesKey("mini_ai_confidence")
+        val BACKGROUND_KEEP_ALIVE = booleanPreferencesKey("background_keep_alive_enabled")
     }
 
     val settings: Flow<AppSettings> = context.dataStore.data.map { prefs ->
@@ -141,7 +143,8 @@ class SettingsDataStore(private val context: Context) {
             voiceHandsFreeEnabled = prefs[Keys.VOICE_HANDS_FREE] ?: false,
             voiceSpokenFeedbackEnabled = prefs[Keys.VOICE_SPOKEN_FEEDBACK] ?: true,
             miniAiEnabled = prefs[Keys.MINI_AI_ENABLED] ?: true,
-            miniAiTokenSaverConfidence = prefs[Keys.MINI_AI_CONFIDENCE] ?: 0.78f
+            miniAiTokenSaverConfidence = prefs[Keys.MINI_AI_CONFIDENCE] ?: 0.78f,
+            backgroundKeepAliveEnabled = prefs[Keys.BACKGROUND_KEEP_ALIVE] ?: true
         )
     }
 
@@ -249,5 +252,9 @@ class SettingsDataStore(private val context: Context) {
 
     suspend fun clearRestartNotice() {
         context.dataStore.edit { it[Keys.PENDING_RESTART_NOTICE] = false }
+    }
+
+    suspend fun updateBackgroundKeepAlive(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.BACKGROUND_KEEP_ALIVE] = enabled }
     }
 }

@@ -4,8 +4,13 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Path
 import android.graphics.Rect
+import android.content.ComponentName
+import android.content.Context
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
@@ -16,6 +21,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.Collections
 import java.util.IdentityHashMap
+
+enum class AccessibilityHealthState(val label: String) {
+    CONNECTED("CONNECTED"),
+    ENABLED_BUT_UNBOUND("NEEDS RE-TOGGLE"),
+    DISABLED("DISABLED")
+}
 
 data class ObservedUiNode(
     val text: String,
@@ -36,11 +47,18 @@ class PersonalAiAccessibilityService : AccessibilityService() {
     @Volatile
     private var lastEventTraverseAtMs: Long = 0L
 
+    private val mainHandler = Handler(Looper.getMainLooper())
+
     override fun onServiceConnected() {
         runCatching {
             super.onServiceConnected()
             instance = this
             _isConnected.value = true
+            _healthState.value = AccessibilityHealthState.CONNECTED
+            com.example.scheduler.AgentForegroundService.startOrRefresh(
+                this,
+                "Virtual Hands Accessibility Active • 24/7 Ready"
+            )
         }
     }
 
@@ -77,6 +95,7 @@ class PersonalAiAccessibilityService : AccessibilityService() {
         runCatching { super.onDestroy() }
         if (instance === this) instance = null
         _isConnected.value = false
+        refreshHealthState(this)
     }
 
     fun getScreenSize(): Pair<Int, Int> {
@@ -169,7 +188,9 @@ class PersonalAiAccessibilityService : AccessibilityService() {
         if (node == null || out.size >= limit || depth >= AccessibilitySafetyGuard.MAX_TRAVERSE_DEPTH) return
         if (!visitedNodes.add(node)) return
         try {
-            if (!node.isVisibleToUser) return
+            // Do NOT return early when container/wrapper node reports isVisibleToUser == false;
+            // many Compose, WebView, Facebook & OEM containers hide parent flags while children are visible.
+            val isSelfVisible = runCatching { node.isVisibleToUser }.getOrDefault(true)
 
             val rect = Rect()
             node.getBoundsInScreen(rect)
@@ -195,7 +216,7 @@ class PersonalAiAccessibilityService : AccessibilityService() {
             val viewId = node.viewIdResourceName?.substringAfterLast("/") ?: ""
             val displayLabel = rawText.ifBlank { hint }
 
-            if (visibleOnScreen && (displayLabel.isNotBlank() || desc.isNotBlank() || node.isClickable || node.isEditable)) {
+            if (isSelfVisible && visibleOnScreen && (displayLabel.isNotBlank() || desc.isNotBlank() || node.isClickable || node.isEditable)) {
                 val dedupKey = "${displayLabel.take(40)}|${desc.take(40)}|${rect.left},${rect.top},${rect.right},${rect.bottom}|${node.isClickable}|${node.isEditable}"
                 if (seenKeys.add(dedupKey)) {
                     out.add(
@@ -228,6 +249,21 @@ class PersonalAiAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun dispatchSafeGesture(description: GestureDescription, tag: String): Boolean {
+        val cb = object : GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription?) {
+                _lastGestureDiagnostic.value = "$tag completed"
+            }
+
+            override fun onCancelled(gestureDescription: GestureDescription?) {
+                _lastGestureDiagnostic.value = "$tag cancelled by OS/screen"
+            }
+        }
+        return runCatching {
+            dispatchGesture(description, cb, mainHandler)
+        }.getOrDefault(false)
+    }
+
     fun performTap(x: Float, y: Float): Boolean = runCatching {
         if (CommandSecurityGuard.isProtectedPackage(_activePackage.value)) return false
         val (w, h) = getScreenSize()
@@ -235,7 +271,7 @@ class PersonalAiAccessibilityService : AccessibilityService() {
         val safeY = AccessibilitySafetyGuard.clampCoordinate(y, h.toFloat())
         val path = Path().apply { moveTo(safeX, safeY) }
         val stroke = GestureDescription.StrokeDescription(path, 0L, 45L)
-        dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
+        dispatchSafeGesture(GestureDescription.Builder().addStroke(stroke).build(), "tap(${safeX.toInt()},${safeY.toInt()})")
     }.getOrDefault(false)
 
     fun performDoubleTap(x: Float, y: Float): Boolean = runCatching {
@@ -247,7 +283,7 @@ class PersonalAiAccessibilityService : AccessibilityService() {
         val p2 = Path().apply { moveTo(safeX, safeY) }
         val s1 = GestureDescription.StrokeDescription(p1, 0L, 35L)
         val s2 = GestureDescription.StrokeDescription(p2, 95L, 35L)
-        dispatchGesture(GestureDescription.Builder().addStroke(s1).addStroke(s2).build(), null, null)
+        dispatchSafeGesture(GestureDescription.Builder().addStroke(s1).addStroke(s2).build(), "double_tap")
     }.getOrDefault(false)
 
     fun performLongPress(x: Float, y: Float): Boolean = runCatching {
@@ -257,7 +293,7 @@ class PersonalAiAccessibilityService : AccessibilityService() {
         val safeY = AccessibilitySafetyGuard.clampCoordinate(y, h.toFloat())
         val path = Path().apply { moveTo(safeX, safeY) }
         val stroke = GestureDescription.StrokeDescription(path, 0L, 580L)
-        dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
+        dispatchSafeGesture(GestureDescription.Builder().addStroke(stroke).build(), "long_press")
     }.getOrDefault(false)
 
     fun performSwipe(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long = 260L): Boolean = runCatching {
@@ -272,7 +308,7 @@ class PersonalAiAccessibilityService : AccessibilityService() {
             lineTo(sx2, sy2)
         }
         val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs.coerceIn(90L, 1200L))
-        dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
+        dispatchSafeGesture(GestureDescription.Builder().addStroke(stroke).build(), "swipe")
     }.getOrDefault(false)
 
     fun performDirectionalScroll(direction: String): Boolean = runCatching {
@@ -532,10 +568,42 @@ class PersonalAiAccessibilityService : AccessibilityService() {
         private val _isConnected = MutableStateFlow(false)
         val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
 
+        private val _healthState = MutableStateFlow(AccessibilityHealthState.DISABLED)
+        val healthState: StateFlow<AccessibilityHealthState> = _healthState.asStateFlow()
+
         private val _activePackage = MutableStateFlow("None")
         val activePackage: StateFlow<String> = _activePackage.asStateFlow()
 
         private val _liveNodes = MutableStateFlow<List<ObservedUiNode>>(emptyList())
         val liveNodes: StateFlow<List<ObservedUiNode>> = _liveNodes.asStateFlow()
+
+        private val _lastGestureDiagnostic = MutableStateFlow("")
+        val lastGestureDiagnostic: StateFlow<String> = _lastGestureDiagnostic.asStateFlow()
+
+        fun isEnabledInSystemSettings(context: Context): Boolean {
+            return runCatching {
+                val enabled = Settings.Secure.getString(
+                    context.contentResolver,
+                    Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+                ).orEmpty()
+                val flat = ComponentName(context, PersonalAiAccessibilityService::class.java).flattenToString()
+                val shortFlat = ComponentName(context, PersonalAiAccessibilityService::class.java).flattenToShortString()
+                enabled.contains(flat, ignoreCase = true) ||
+                    enabled.contains(shortFlat, ignoreCase = true) ||
+                    enabled.contains(PersonalAiAccessibilityService::class.java.simpleName)
+            }.getOrDefault(false)
+        }
+
+        fun refreshHealthState(context: Context): AccessibilityHealthState {
+            val bound = instance != null
+            _isConnected.value = bound
+            val next = when {
+                bound -> AccessibilityHealthState.CONNECTED
+                isEnabledInSystemSettings(context) -> AccessibilityHealthState.ENABLED_BUT_UNBOUND
+                else -> AccessibilityHealthState.DISABLED
+            }
+            _healthState.value = next
+            return next
+        }
     }
 }

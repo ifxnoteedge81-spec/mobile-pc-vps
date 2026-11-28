@@ -29,6 +29,7 @@ import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 class AppContainer(context: Context) {
@@ -138,12 +139,51 @@ class AppContainer(context: Context) {
             report.take(900)
         }
 
-        // Sweep overdue WhatsApp scheduled items & restore pending WorkManager triggers on startup
+        // Sweep overdue WhatsApp scheduled items, start 24/7 Keep-Alive daemon & auto-boot WA bridge
+        workScheduler.ensureKeepAliveWatchdogScheduled()
         appScope.launch(Dispatchers.IO) {
             runCatching {
                 val pending = repository.getPendingWhatsAppSchedulesSnapshot()
                 workScheduler.scheduleAllPendingWhatsApp(pending)
                 whatsAppBotEngine.sweepDueScheduledDispatches()
+            }
+            runCatching {
+                val current = settingsStore.settings.first()
+                val shouldKeepAlive = com.example.scheduler.KeepAlivePolicy.shouldKeepBackgroundDaemonAlive(
+                    keepAliveEnabled = current.backgroundKeepAliveEnabled,
+                    waBotEnabled = current.waBotEnabled,
+                    handsFreeVoiceEnabled = current.voiceHandsFreeEnabled,
+                    hasPendingWork = false
+                )
+                if (shouldKeepAlive) {
+                    com.example.scheduler.AgentForegroundService.startOrRefresh(
+                        context,
+                        if (current.waBotEnabled) "24/7 Active • WhatsApp AI Bot & Virtual Hands Ready"
+                        else "24/7 Background Engine Active • Virtual Hands Ready"
+                    )
+                }
+                if (current.waBotEnabled) {
+                    com.example.whatsapp.WhatsAppNotificationService.requestRebindIfNeeded(context)
+                    kotlinx.coroutines.withContext(Dispatchers.Main) {
+                        whatsAppWebBridge.ensureInitialized(loadIfNeeded = true)
+                    }
+                }
+            }
+            // Lightweight periodic keep-alive heartbeat for detached WhatsApp Web & NotificationListener rebind
+            while (true) {
+                kotlinx.coroutines.delay(45_000L)
+                runCatching {
+                    val current = settingsStore.settings.first()
+                    if (current.waBotEnabled) {
+                        com.example.whatsapp.WhatsAppNotificationService.requestRebindIfNeeded(context)
+                        whatsAppBotEngine.refreshNotificationStatus()
+                        kotlinx.coroutines.withContext(Dispatchers.Main) {
+                            whatsAppWebBridge.ensureInitialized(loadIfNeeded = true)
+                            whatsAppWebBridge.pulseKeepAlive()
+                        }
+                        whatsAppBotEngine.sweepDueScheduledDispatches()
+                    }
+                }
             }
         }
     }

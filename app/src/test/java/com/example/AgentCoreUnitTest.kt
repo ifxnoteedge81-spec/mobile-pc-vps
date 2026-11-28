@@ -1046,4 +1046,49 @@ class AgentCoreUnitTest {
             )
         }
     }
+
+    @Test
+    fun keepAlivePolicy_andPostUpdateRecovery_stressTest1000Iterations() {
+        assertEquals(9L, com.example.runtime.AppUpdateChecker.extractRunNumber("main-9"))
+        assertTrue(
+            com.example.runtime.AppUpdateChecker.isRemoteNewer(
+                installedVersionCode = 9571587L,
+                installedVersionName = "1.0.main-8",
+                remoteVersionCode = 9571610L,
+                remoteVersionLabel = "main-9"
+            )
+        )
+        assertTrue(
+            !com.example.runtime.AppUpdateChecker.isRemoteNewer(
+                installedVersionCode = 9571610L,
+                installedVersionName = "1.0.main-9",
+                remoteVersionCode = 9571610L,
+                remoteVersionLabel = "main-9"
+            )
+        )
+
+        for (i in 0 until 1000) {
+            val keepAlive = i % 2 == 0
+            val waBot = i % 3 == 0
+            val voice = i % 5 == 0
+            val pending = i % 7 == 0
+            val shouldKeep = com.example.scheduler.KeepAlivePolicy.shouldKeepBackgroundDaemonAlive(
+                keepAliveEnabled = keepAlive,
+                waBotEnabled = waBot,
+                handsFreeVoiceEnabled = voice,
+                hasPendingWork = pending
+            )
+            assertEquals(keepAlive || waBot || voice || pending, shouldKeep)
+
+            val shouldRebind = com.example.scheduler.KeepAlivePolicy.shouldRebindNotificationListener(
+                waBotEnabled = waBot,
+                permissionGrantedInSettings = i % 4 != 0,
+                isListenerBound = i % 6 == 0
+            )
+            assertEquals(waBot && (i % 4 != 0) && (i % 6 != 0), shouldRebind)
+
+            val backoff = com.example.scheduler.KeepAlivePolicy.computeRestartBackoffMs(i % 10)
+            assertTrue("Backoff out of range: $backoff", backoff in 2_000L..32_000L)
+        }
+    }
 }
